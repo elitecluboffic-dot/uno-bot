@@ -1,29 +1,41 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from src.cards import Card, Color, CardType
 from typing import Optional
+import io
 
 
-def build_hand_keyboard(
+def get_playable_indices(
     hand: list[Card],
     top_card: Optional[Card],
     current_color: Optional[Color],
+    pending_draw: int = 0
+) -> list[int]:
+    playable = []
+    for i, card in enumerate(hand):
+        if pending_draw > 0:
+            if card.card_type in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR):
+                playable.append(i)
+        else:
+            if top_card and card.can_play_on(top_card, current_color):
+                playable.append(i)
+    return playable
+
+
+def build_play_keyboard(
+    hand: list[Card],
+    playable_indices: list[int],
+    chat_id: int,
     pending_draw: int = 0
 ) -> InlineKeyboardMarkup:
     buttons = []
     row = []
 
     for i, card in enumerate(hand):
-        playable = card.can_play_on(top_card, current_color) if top_card else True
-
-        # If pending draw, only stackable cards are playable
-        if pending_draw > 0:
-            playable = card.card_type in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR)
-
-        label = f"{'✅' if playable else '❌'} {card}"
-        # Get chat_id from context - we store it in card index with a placeholder
-        # Will be filled by handlers
-        row.append(InlineKeyboardButton(label, callback_data=f"play:CHATID:{i}"))
-
+        is_playable = i in playable_indices
+        emoji = "✅" if is_playable else "❌"
+        label = f"{emoji} {i+1}. {card}"
+        btn = InlineKeyboardButton(label, callback_data=f"play:{chat_id}:{i}")
+        row.append(btn)
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -31,68 +43,33 @@ def build_hand_keyboard(
     if row:
         buttons.append(row)
 
-    draw_label = f"🎴 Ambil kartu / Draw" + (f" (+{pending_draw} wajib!)" if pending_draw > 0 else "")
-    buttons.append([InlineKeyboardButton(draw_label, callback_data=f"draw:CHATID:0")])
-
-    return InlineKeyboardMarkup(buttons)
-
-
-def build_hand_keyboard(
-    hand: list[Card],
-    top_card: Optional[Card],
-    current_color: Optional[Color],
-    pending_draw: int,
-    chat_id: int = 0
-) -> InlineKeyboardMarkup:
-    buttons = []
-    row = []
-
-    for i, card in enumerate(hand):
-        playable = card.can_play_on(top_card, current_color) if top_card else True
-
-        if pending_draw > 0:
-            playable = card.card_type in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR)
-
-        label = f"{'✅' if playable else '❌'} {card}"
-        row.append(InlineKeyboardButton(label, callback_data=f"play:{chat_id}:{i}"))
-
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-
-    if row:
-        buttons.append(row)
-
-    draw_label = "🎴 Ambil kartu / Draw" + (f" (+{pending_draw} wajib!)" if pending_draw > 0 else "")
+    # Draw button
+    if pending_draw > 0:
+        draw_label = f"💔 Ambil +{pending_draw} kartu (wajib)"
+    else:
+        draw_label = "🎴 Ambil kartu / Draw card"
     buttons.append([InlineKeyboardButton(draw_label, callback_data=f"draw:{chat_id}:0")])
 
     return InlineKeyboardMarkup(buttons)
 
 
-def build_color_keyboard(chat_id: int, card_index: int) -> InlineKeyboardMarkup:
-    colors = [
-        (Color.RED, "🔴 Merah / Red"),
-        (Color.GREEN, "🟢 Hijau / Green"),
-        (Color.BLUE, "🔵 Biru / Blue"),
-        (Color.YELLOW, "🟡 Kuning / Yellow"),
-    ]
-    buttons = []
-    row = []
-    for color, label in colors:
-        row.append(InlineKeyboardButton(label, callback_data=f"color:{chat_id}:{color.name}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    return InlineKeyboardMarkup(buttons)
+def build_color_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔴 Merah / Red", callback_data=f"color:{chat_id}:RED"),
+            InlineKeyboardButton("🟢 Hijau / Green", callback_data=f"color:{chat_id}:GREEN"),
+        ],
+        [
+            InlineKeyboardButton("🔵 Biru / Blue", callback_data=f"color:{chat_id}:BLUE"),
+            InlineKeyboardButton("🟡 Kuning / Yellow", callback_data=f"color:{chat_id}:YELLOW"),
+        ],
+    ])
 
 
 def mention(user) -> str:
-    name = user.first_name or user.username or "User"
     if user.username:
         return f"[@{user.username}](https://t.me/{user.username})"
-    return name
+    return user.first_name or "User"
 
 
 def game_status_text(status: str) -> str:
