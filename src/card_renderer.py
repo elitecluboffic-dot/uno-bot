@@ -282,3 +282,62 @@ def render_hand(cards: list[dict], playable_indices: list[int], chat_id: int) ->
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+def render_card_with_overlay(card_dict: dict, playable: bool) -> bytes:
+    """
+    Render kartu dengan overlay visual untuk inline query:
+    - playable=True  → border hijau tebal + centang putih pojok kanan atas
+    - playable=False → gelap + silang merah di tengah
+    Ukuran output sama dengan render_top_card (2x card size).
+    """
+    center, corner = _card_labels(card_dict)
+    color = card_dict["color"]
+
+    # Render base card lalu scale 2x supaya konsisten dengan top card
+    img = _draw_single_card(color, center, corner)
+    img = img.resize((CARD_W * 2, CARD_H * 2), Image.LANCZOS)
+    w, h = img.size  # 480 x 720
+
+    if not playable:
+        # --- Overlay gelap semi-transparan ---
+        dark_overlay = Image.new("RGBA", (w, h), (0, 0, 0, 150))
+        img = Image.alpha_composite(img, dark_overlay)
+
+        # --- Silang merah ---
+        d = ImageDraw.Draw(img)
+        margin = 36
+        lw = max(w // 10, 10)
+        d.line([(margin, margin), (w - margin, h - margin)], fill=(220, 30, 30, 255), width=lw)
+        d.line([(w - margin, margin), (margin, h - margin)], fill=(220, 30, 30, 255), width=lw)
+
+    else:
+        # --- Border hijau tebal di luar kartu ---
+        d = ImageDraw.Draw(img)
+        bw = max(w // 14, 8)
+        radius = 52  # 28 * 2 (scaled)
+        d.rounded_rectangle(
+            [0, 0, w - 1, h - 1],
+            radius=radius,
+            outline=(50, 220, 50, 255),
+            width=bw,
+        )
+
+        # --- Centang putih di pojok kanan atas ---
+        # Bentuk: garis L terbalik (checkmark)
+        cx = w - 42
+        cy = 36
+        s = 22  # ukuran centang
+        lw_check = 6
+        # Titik: kiri bawah → tengah → kanan atas
+        pts = [
+            (cx - s, cy),           # kiri
+            (cx - s // 3, cy + s),  # bawah tengah
+            (cx + s, cy - s // 2),  # kanan atas
+        ]
+        d.line(pts, fill=(255, 255, 255, 255), width=lw_check)
+
+    # Simpan sebagai JPEG (lebih kecil, cocok untuk upload cache Telegram)
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=88)
+    return buf.getvalue()
