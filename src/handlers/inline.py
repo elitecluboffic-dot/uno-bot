@@ -8,18 +8,17 @@ Alur:
 """
 
 import io
+import json
+import os
 import logging
 from telegram import (
     Update,
-    InlineQueryResultCachedPhoto,
-    InlineQueryResultPhoto,
-    InputMediaPhoto,
+    InlineQueryResultCachedSticker,
     InlineQueryResultArticle,
     InputTextMessageContent,
 )
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
 
 from src.game import get_game, save_game, delete_game, draw_card, add_win
 from src.cards import Card, Color, CardType
@@ -28,40 +27,34 @@ from src.utils import (
     build_color_keyboard,
     mention,
 )
-from src.card_renderer import render_card_sticker, render_top_card
+from src.card_renderer import render_top_card
 
 logger = logging.getLogger(__name__)
 
-# Cache: {card_key: file_id} — supaya tidak re-upload tiap kali
-_card_file_id_cache: dict[str, str] = {}
+STICKER_FILE = "data/sticker_ids.json"
+_sticker_ids: dict = {}
+
+
+def _load_stickers():
+    """Load sticker file_ids dari JSON, sekali saja."""
+    global _sticker_ids
+    if not _sticker_ids and os.path.exists(STICKER_FILE):
+        with open(STICKER_FILE) as f:
+            _sticker_ids = json.load(f)
 
 
 def _card_key(card_dict: dict) -> str:
-    """Unique key for a card, used for caching file_id."""
+    """
+    Key harus sama persis dengan CARD_ORDER di get_stickers.py.
+    NUMBER  → "RED_1", "BLUE_0", dst
+    Lainnya → "RED_SKIP", "WILD_WILD", "WILD_WILD_DRAW_FOUR", dst
+    """
     ct = card_dict["card_type"]
     color = card_dict["color"]
     num = card_dict.get("number", "")
-    return f"{color}_{ct}_{num}"
-
-
-async def _get_or_upload_card(bot, card_dict: dict) -> str:
-    """
-    Return cached file_id for a card, or upload it and cache the result.
-    Returns file_id string.
-    """
-    key = _card_key(card_dict)
-    if key in _card_file_id_cache:
-        return _card_file_id_cache[key]
-
-    # Render card as PNG
-    img_bytes = render_top_card(card_dict)
-
-    # Upload to Telegram via a dummy send to get file_id
-    # We send to the bot's own file storage using send_photo with chat_id workaround
-    # Actually we'll return raw bytes and let InlineQueryResultPhoto handle it via upload
-    # Store after first real use
-    _card_file_id_cache[key] = None  # placeholder
-    return None
+    if ct == "NUMBER":
+        return f"{color}_{num}"
+    return f"{color}_{ct}"
 
 
 async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -69,39 +62,29 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     Called when user types @botKamu in any chat.
     Shows the player's hand as inline results.
     """
+    _load_stickers()
+
     query = update.inline_query
     user = query.from_user
     user_id = user.id
 
-    # Find which game this user is in
-    # We need to find the game where this user is the current player
-    # Pass chat_id via query text: user types "@bot <chat_id>" or we detect from context
-    # Best approach: user types @bot (empty query) → we find their active game
-
-    # Parse optional chat_id from query string (for multi-group support)
     query_text = query.query.strip()
-
     game = None
-    chat_id_hint = None
 
     if query_text.isdigit():
-        chat_id_hint = int(query_text)
-        game = get_game(chat_id_hint)
+        game = get_game(int(query_text))
     else:
-        # Baca semua game aktif langsung dari file — tidak bergantung bot_data
-        from src.game import _load_all
+        from src.game import _load_all, Game
         all_games = _load_all()
         for cid_str, gdata in all_games.items():
             if gdata.get("status") != "playing":
                 continue
-            from src.game import Game
             g = Game.from_dict(gdata)
             cp = g.current_player
             if cp and cp.user_id == user_id:
                 game = g
                 break
 
-    # Not in any game or not current player
     if not game or game.status != "playing":
         await query.answer(
             results=[_make_no_game_result()],
@@ -140,30 +123,21 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for i, card in enumerate(current.hand):
         card_dict = card.to_dict()
         is_playable = i in playable
-
-        # Render card image
-        img_bytes = render_top_card(card_dict)
-
         label = _card_display_name(card)
         desc = "✅ Bisa dimainkan" if is_playable else "❌ Tidak bisa dimainkan"
-
-        # Encode card index + chat_id into result id
         result_id = f"card:{game.chat_id}:{i}:{'1' if is_playable else '0'}"
 
-        # Use InlineQueryResultPhoto with raw bytes via InputFile
-        # We upload via bot.send_photo to get file_id, then cache
-        cached_fid = _card_file_id_cache.get(_card_key(card_dict))
+        sticker_fid = _sticker_ids.get(_card_key(card_dict))
 
-        if cached_fid:
-            results.append(InlineQueryResultCachedPhoto(
+        if sticker_fid:
+            # Pakai stiker — result_id sudah cukup untuk handle_chosen_inline_result
+            # TIDAK perlu input_message_content, chosen_inline_result tetap fired
+            results.append(InlineQueryResultCachedSticker(
                 id=result_id,
-                photo_file_id=cached_fid,
-                title=label,
-                description=desc,
-                caption=f"{'✅' if is_playable else '❌'} {label}",
+                sticker_file_id=sticker_fid,
             ))
         else:
-            # Fallback: article with card info (will upgrade to photo after first upload)
+            # Fallback article kalau stiker tidak ditemukan
             results.append(InlineQueryResultArticle(
                 id=result_id,
                 title=f"{'✅' if is_playable else '❌'} {label}",
@@ -213,7 +187,6 @@ async def _process_draw(ctx, user, chat_id: int):
         return
 
     if game.pending_draw > 0:
-        # Must draw stacked cards
         for _ in range(game.pending_draw):
             c = draw_card(game)
             if c:
@@ -239,7 +212,6 @@ async def _process_draw(ctx, user, chat_id: int):
         current.hand.append(c)
 
         if c.can_play_on(game.top_card, game.current_color):
-            # Can play the drawn card — ask via color keyboard or just notify
             save_game(game)
             from src.utils import build_play_keyboard
             from src.card_renderer import render_hand
@@ -317,16 +289,12 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     # Send card image to group
     card_dict = card.to_dict()
     img_bytes = render_top_card(card_dict)
-    sent = await ctx.bot.send_photo(
+    await ctx.bot.send_photo(
         chat_id=chat_id,
         photo=io.BytesIO(img_bytes),
         caption=f"🃏 *@{current.username}* main: *{card}*",
         parse_mode=ParseMode.MARKDOWN
     )
-
-    # Cache file_id for future use
-    fid = sent.photo[-1].file_id
-    _card_file_id_cache[_card_key(card_dict)] = fid
 
     # Handle wild cards — need color picker
     if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
@@ -411,7 +379,6 @@ async def send_turn_to_group(ctx, game):
     current = game.current_player
     top = game.top_card
 
-    # Register this chat as active
     if "active_chat_ids" not in ctx.bot_data:
         ctx.bot_data["active_chat_ids"] = set()
     ctx.bot_data["active_chat_ids"].add(game.chat_id)
@@ -431,7 +398,6 @@ async def send_turn_to_group(ctx, game):
         f"\n👥 Kartu pemain:\n{card_counts}"
     )
 
-    # Tombol "Make your choice!" di grup — tap langsung buka inline query
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🃏 Make your choice!",
@@ -439,7 +405,6 @@ async def send_turn_to_group(ctx, game):
         )
     ]])
 
-    # Kirim top card + tombol ke GRUP
     top_img = render_top_card(top.to_dict())
     await ctx.bot.send_photo(
         chat_id=game.chat_id,
@@ -449,7 +414,6 @@ async def send_turn_to_group(ctx, game):
         parse_mode=ParseMode.MARKDOWN
     )
 
-    # Kirim hand image ke DM pemain (biar lawan tidak bisa lihat)
     playable = get_playable_indices(current.hand, top, game.current_color, game.pending_draw)
     hand_dicts = [c.to_dict() for c in current.hand]
     hand_img = render_hand(hand_dicts, playable, game.chat_id)
@@ -467,8 +431,6 @@ async def send_turn_to_group(ctx, game):
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
-        # DM gagal — pemain belum pernah /start bot di DM
-        # Kirim notif ke grup
         await ctx.bot.send_message(
             game.chat_id,
             f"⚠️ *@{current.username}*, start dulu bot ini di DM agar kartu dikirim private!\n"
