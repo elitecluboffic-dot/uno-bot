@@ -7,7 +7,6 @@ Alur:
 3. Pemain tap kartu → handle_chosen_inline_result dipanggil → proses logika game
 """
 
-import io
 import json
 import os
 import logging
@@ -27,7 +26,6 @@ from src.utils import (
     build_color_keyboard,
     mention,
 )
-from src.card_renderer import render_top_card
 
 logger = logging.getLogger(__name__)
 
@@ -130,14 +128,11 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         sticker_fid = _sticker_ids.get(_card_key(card_dict))
 
         if sticker_fid:
-            # Pakai stiker — result_id sudah cukup untuk handle_chosen_inline_result
-            # TIDAK perlu input_message_content, chosen_inline_result tetap fired
             results.append(InlineQueryResultCachedSticker(
                 id=result_id,
                 sticker_file_id=sticker_fid,
             ))
         else:
-            # Fallback article kalau stiker tidak ditemukan
             results.append(InlineQueryResultArticle(
                 id=result_id,
                 title=f"{'✅' if is_playable else '❌'} {label}",
@@ -157,7 +152,7 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_chosen_inline_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Called when user picks a card from inline results.
-    Processes the game logic and sends card image to group.
+    Processes the game logic and sends message to group.
     """
     result = update.chosen_inline_result
     result_id = result.result_id
@@ -214,20 +209,14 @@ async def _process_draw(ctx, user, chat_id: int):
         if c.can_play_on(game.top_card, game.current_color):
             save_game(game)
             from src.utils import build_play_keyboard
-            from src.card_renderer import render_hand
-            import io as _io
 
             playable = get_playable_indices(current.hand, game.top_card, game.current_color, 0)
-            hand_dicts = [card.to_dict() for card in current.hand]
-            img_bytes = render_hand(hand_dicts, playable, chat_id)
-
             keyboard = build_play_keyboard(current.hand, playable, chat_id, 0)
-            await ctx.bot.send_photo(
+            await ctx.bot.send_message(
                 chat_id=chat_id,
-                photo=_io.BytesIO(img_bytes),
-                caption=(
+                text=(
                     f"🎴 *@{current.username}* ambil: *{c}*\n"
-                    f"Kartu bisa dimainkan! Pilih kartu atau ketik @{ctx.bot.username}"
+                    f"Kartu bisa dimainkan! Tap 'Make your choice!' atau ketik @{ctx.bot.username}"
                 ),
                 reply_markup=keyboard,
                 parse_mode=ParseMode.MARKDOWN
@@ -286,13 +275,10 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     game.discard_pile.append(card)
     current.uno_called = False
 
-    # Send card image to group
-    card_dict = card.to_dict()
-    img_bytes = render_top_card(card_dict)
-    await ctx.bot.send_photo(
+    # Notify group (text only)
+    await ctx.bot.send_message(
         chat_id=chat_id,
-        photo=io.BytesIO(img_bytes),
-        caption=f"🃏 *@{current.username}* main: *{card}*",
+        text=f"🃏 *@{current.username}* main: *{card}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -368,13 +354,9 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
 
 async def send_turn_to_group(ctx, game):
     """
-    Notify group whose turn it is.
-    - Kirim top card + tombol 'Make your choice!' ke GRUP
-    - Kirim hand image ke DM pemain (private, biar lawan tidak lihat)
+    Notify group whose turn it is — teks saja, tanpa gambar.
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    from src.card_renderer import render_hand
-    from src.utils import get_playable_indices
 
     current = game.current_player
     top = game.top_card
@@ -383,19 +365,20 @@ async def send_turn_to_group(ctx, game):
         ctx.bot_data["active_chat_ids"] = set()
     ctx.bot_data["active_chat_ids"].add(game.chat_id)
 
-    card_counts = "\n".join([
-        f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}: {len(p.hand)} kartu"
+    # Hanya nama pemain, tanpa sisa kartu
+    player_list = "\n".join([
+        f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}"
         + (" 🔔 *UNO!*" if len(p.hand) == 1 else "")
         for p in game.players
     ])
 
     pending_msg = f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else ""
 
-    caption = (
+    text = (
         f"▶️ Giliran / Turn: *@{current.username}*\n"
         f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
         f"{pending_msg}"
-        f"\n👥 Kartu pemain:\n{card_counts}"
+        f"\n👥 Pemain:\n{player_list}"
     )
 
     keyboard = InlineKeyboardMarkup([[
@@ -405,38 +388,12 @@ async def send_turn_to_group(ctx, game):
         )
     ]])
 
-    top_img = render_top_card(top.to_dict())
-    await ctx.bot.send_photo(
+    await ctx.bot.send_message(
         chat_id=game.chat_id,
-        photo=io.BytesIO(top_img),
-        caption=caption,
+        text=text,
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
-
-    playable = get_playable_indices(current.hand, top, game.current_color, game.pending_draw)
-    hand_dicts = [c.to_dict() for c in current.hand]
-    hand_img = render_hand(hand_dicts, playable, game.chat_id)
-
-    try:
-        await ctx.bot.send_photo(
-            chat_id=current.user_id,
-            photo=io.BytesIO(hand_img),
-            caption=(
-                f"🃏 Kartu kamu — giliran sekarang!\n"
-                f"Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
-                f"{pending_msg}"
-                f"_(terang = bisa dimainkan, tap 'Make your choice!' di grup)_"
-            ),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception:
-        await ctx.bot.send_message(
-            game.chat_id,
-            f"⚠️ *@{current.username}*, start dulu bot ini di DM agar kartu dikirim private!\n"
-            f"Tap: @{(await ctx.bot.get_me()).username}",
-            parse_mode=ParseMode.MARKDOWN
-        )
 
 
 def _card_display_name(card: Card) -> str:
