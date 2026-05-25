@@ -401,8 +401,10 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
 async def send_turn_to_group(ctx, game):
     """
     Notify group whose turn it is.
-    Instead of sending hand image with buttons, just notify and tell player to use inline.
+    Sends top card image + "Make your choice!" button that opens inline query.
     """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     current = game.current_player
     top = game.top_card
 
@@ -414,28 +416,35 @@ async def send_turn_to_group(ctx, game):
 
     pending_msg = f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else ""
 
-    # Send top card image
-    top_img = render_top_card(top.to_dict())
+    # Register this chat as active
+    if "active_chat_ids" not in ctx.bot_data:
+        ctx.bot_data["active_chat_ids"] = set()
+    ctx.bot_data["active_chat_ids"].add(game.chat_id)
+
     bot_username = (await ctx.bot.get_me()).username
 
     caption = (
         f"▶️ Giliran / Turn: *@{current.username}*\n"
         f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
         f"{pending_msg}"
-        f"\n👥 Kartu pemain:\n{card_counts}\n\n"
-        f"*@{current.username}*, ketik *@{bot_username}* untuk pilih kartu!\n"
-        f"_(inline mode — kartu muncul otomatis)_"
+        f"\n👥 Kartu pemain:\n{card_counts}"
     )
 
-    # Register this chat as active
-    if "active_chat_ids" not in ctx.bot_data:
-        ctx.bot_data["active_chat_ids"] = set()
-    ctx.bot_data["active_chat_ids"].add(game.chat_id)
+    # Button "Make your choice!" — tap langsung buka inline query @bot
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🃏 Make your choice!",
+            switch_inline_query_current_chat=""
+        )
+    ]])
 
+    # Send top card image + button
+    top_img = render_top_card(top.to_dict())
     await ctx.bot.send_photo(
         chat_id=game.chat_id,
         photo=io.BytesIO(top_img),
         caption=caption,
+        reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
 
