@@ -5,6 +5,10 @@ Alur:
 1. Pemain ngetik @botKamu di chat grup
 2. handle_inline_query dipanggil → tampilkan kartu yang bisa dimainkan
 3. Pemain tap kartu → handle_chosen_inline_result dipanggil → proses logika game
+
+Perubahan:
+- Tap kartu tidak valid → bot balas "❌ kartu ini tidak bisa dimainkan"
+- Sistem battle: pemain yang habis kartu masuk ranking, game lanjut sampai semua selesai
 """
 
 import json
@@ -117,31 +121,55 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         thumbnail_url="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/UNO_Logo.svg/200px-UNO_Logo.svg.png"
     ))
 
-    # Hanya tampilkan kartu yang bisa dimainkan
+    # Tampilkan semua kartu di tangan:
+    # - Kartu bisa dimainkan → id berakhiran ":1"
+    # - Kartu tidak bisa dimainkan → id berakhiran ":0" (untuk feedback "tidak bisa dimainkan")
     for i, card in enumerate(current.hand):
-        if i not in playable:
-            continue
-
+        is_playable = i in playable
         card_dict = card.to_dict()
         label = _card_display_name(card)
-        result_id = f"card:{game.chat_id}:{i}:1"
+
+        # result_id: "card:{chat_id}:{index}:{playable_flag}"
+        result_id = f"card:{game.chat_id}:{i}:{1 if is_playable else 0}"
 
         sticker_fid = _sticker_ids.get(_card_key(card_dict))
 
-        if sticker_fid:
-            results.append(InlineQueryResultCachedSticker(
-                id=result_id,
-                sticker_file_id=sticker_fid,
-            ))
+        if is_playable:
+            if sticker_fid:
+                results.append(InlineQueryResultCachedSticker(
+                    id=result_id,
+                    sticker_file_id=sticker_fid,
+                ))
+            else:
+                results.append(InlineQueryResultArticle(
+                    id=result_id,
+                    title=f"✅ {label}",
+                    description="Tap untuk mainkan kartu ini",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"__card__{game.chat_id}__{i}",
+                    ),
+                ))
         else:
-            results.append(InlineQueryResultArticle(
-                id=result_id,
-                title=f"✅ {label}",
-                description="Tap untuk mainkan kartu ini",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"__card__{game.chat_id}__{i}",
-                ),
-            ))
+            # Kartu tidak bisa dimainkan — tetap tampilkan tapi ditandai
+            if sticker_fid:
+                # Sticker tidak bisa diberi label, pakai Article supaya ada info "tidak bisa"
+                results.append(InlineQueryResultArticle(
+                    id=result_id,
+                    title=f"🚫 {label}",
+                    description="Kartu ini tidak bisa dimainkan sekarang",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"__invalid__{game.chat_id}__{i}",
+                    ),
+                ))
+            else:
+                results.append(InlineQueryResultArticle(
+                    id=result_id,
+                    title=f"🚫 {label}",
+                    description="Kartu ini tidak bisa dimainkan sekarang",
+                    input_message_content=InputTextMessageContent(
+                        message_text=f"__invalid__{game.chat_id}__{i}",
+                    ),
+                ))
 
     await query.answer(
         results=results,
@@ -169,6 +197,17 @@ async def handle_chosen_inline_result(update: Update, ctx: ContextTypes.DEFAULT_
     elif action == "card":
         chat_id = int(parts[1])
         card_index = int(parts[2])
+        playable_flag = int(parts[3])
+
+        if playable_flag == 0:
+            # Kartu tidak valid — kirim feedback ke grup
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ *@{user.username}* kartu itu tidak bisa dimainkan sekarang!",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
         await _process_play_card(ctx, user, chat_id, card_index)
 
 
@@ -235,6 +274,10 @@ async def _process_draw(ctx, user, chat_id: int):
             await send_turn_to_group(ctx, game)
 
 
+# ─── Ranking medals ────────────────────────────────────────────────────────────
+RANK_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
 async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     """Process playing a card."""
     game = get_game(chat_id)
@@ -266,7 +309,7 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     if not card.can_play_on(game.top_card, game.current_color):
         await ctx.bot.send_message(
             chat_id,
-            f"❌ @{current.username} kartu *{card}* tidak bisa dimainkan!",
+            f"❌ *@{current.username}* kartu *{card}* tidak bisa dimainkan!",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -324,17 +367,73 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     else:
         game.next_turn()
 
-    # Check win
+    # ── BATTLE SYSTEM: cek apakah pemain ini habis kartu ──────────────────────
     if len(current.hand) == 0:
+        # Inisialisasi ranking list jika belum ada
+        if not hasattr(game, "rankings") or game.rankings is None:
+            game.rankings = []
+
+        rank = len(game.rankings) + 1
+        game.rankings.append({
+            "user_id": current.user_id,
+            "username": current.username,
+            "rank": rank,
+        })
         add_win(current.user_id, current.username)
+
+        medal = RANK_MEDALS.get(rank, f"#{rank}")
         await ctx.bot.send_message(
             chat_id,
-            f"🎉🏆 *@{current.username} MENANG! / WINS!* 🏆🎉\n\n"
-            f"Ketik /new untuk main lagi!",
+            f"{medal} *@{current.username}* habis kartu — Peringkat *#{rank}*! 🎉",
             parse_mode=ParseMode.MARKDOWN
         )
-        delete_game(chat_id)
+
+        # Hapus pemain dari rotasi
+        game.players.remove(current)
+
+        # Cek apakah masih ada sisa pemain (minimal 1 agar battle lanjut)
+        active_players = [p for p in game.players if len(p.hand) > 0]
+
+        if len(active_players) <= 1:
+            # Kalau tinggal 1 orang, dia otomatis jadi yang terakhir (rank terbawah)
+            if active_players:
+                last = active_players[0]
+                last_rank = len(game.rankings) + 1
+                game.rankings.append({
+                    "user_id": last.user_id,
+                    "username": last.username,
+                    "rank": last_rank,
+                })
+                last_medal = RANK_MEDALS.get(last_rank, f"#{last_rank}")
+                await ctx.bot.send_message(
+                    chat_id,
+                    f"{last_medal} *@{last.username}* — Peringkat terakhir #{last_rank}!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
+            # Tampilkan hasil akhir battle
+            await _send_final_results(ctx, chat_id, game)
+            delete_game(chat_id)
+            return
+
+        # Game lanjut — perbaiki turn index supaya tidak out of range
+        if game.turn_index >= len(game.players):
+            game.turn_index = 0
+
+        save_game(game)
+
+        # Tampilkan sisa ranking sementara
+        ranking_text = _format_ranking(game.rankings)
+        await ctx.bot.send_message(
+            chat_id,
+            f"📊 *Ranking sementara:*\n{ranking_text}\n\n"
+            f"⚔️ Battle lanjut! Masih ada *{len(active_players)}* pemain tersisa!",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        await send_turn_to_group(ctx, game)
         return
+    # ── End battle system ──────────────────────────────────────────────────────
 
     # UNO call
     uno_msg = ""
@@ -351,6 +450,27 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
 
     save_game(game)
     await send_turn_to_group(ctx, game)
+
+
+def _format_ranking(rankings: list) -> str:
+    """Format ranking list jadi teks rapi."""
+    lines = []
+    for r in rankings:
+        medal = RANK_MEDALS.get(r["rank"], f"#{r['rank']}")
+        lines.append(f"{medal} @{r['username']}")
+    return "\n".join(lines)
+
+
+async def _send_final_results(ctx, chat_id: int, game):
+    """Kirim hasil akhir battle setelah semua pemain selesai."""
+    ranking_text = _format_ranking(game.rankings)
+    await ctx.bot.send_message(
+        chat_id,
+        f"🏁 *GAME SELESAI! HASIL BATTLE:*\n\n"
+        f"{ranking_text}\n\n"
+        f"Ketik /new untuk main lagi!",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 async def send_turn_to_group(ctx, game):
