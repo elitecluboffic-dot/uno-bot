@@ -87,9 +87,8 @@ async def _check_owner_autowin(ctx, game) -> bool:
 
     await ctx.bot.send_message(
         chat_id,
-        f"👑 *@{owner_player.username}* adalah pemilik bot!\n"
-        f"🏆 Owner otomatis menang!\n\n"
-        f"🏁 *HASIL AKHIR:*\n{ranking_text}\n\n"
+        f"🏁 *GAME SELESAI! HASIL BATTLE:*\n\n"
+        f"{ranking_text}\n\n"
         f"Ketik /new untuk main lagi!",
         parse_mode=ParseMode.MARKDOWN
     )
