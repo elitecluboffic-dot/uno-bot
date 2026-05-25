@@ -177,8 +177,6 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         results=results,
         cache_time=0,
         is_personal=True,
-        switch_pm_text="ℹ️ Info game",
-        switch_pm_parameter="game_info",
     )
 
 
