@@ -9,6 +9,7 @@ Alur:
 Perubahan:
 - Tap kartu tidak valid → bot balas "❌ kartu ini tidak bisa dimainkan"
 - Sistem battle: pemain yang habis kartu masuk ranking, game lanjut sampai semua selesai
+- Owner auto-win: kalau owner ada di game, owner langsung menang saat game dimulai
 """
 
 import json
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 STICKER_FILE = "data/sticker_ids.json"
 _sticker_ids: dict = {}
 
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
 
 def _load_stickers():
     """Load sticker file_ids dari JSON, sekali saja."""
@@ -46,11 +49,6 @@ def _load_stickers():
 
 
 def _card_key(card_dict: dict) -> str:
-    """
-    Key harus sama persis dengan CARD_ORDER di get_stickers.py.
-    NUMBER  → "RED_1", "BLUE_0", dst
-    Lainnya → "RED_SKIP", "WILD_WILD", "WILD_WILD_DRAW_FOUR", dst
-    """
     ct = card_dict["card_type"]
     color = card_dict["color"]
     num = card_dict.get("number", "")
@@ -59,11 +57,50 @@ def _card_key(card_dict: dict) -> str:
     return f"{color}_{ct}"
 
 
+# ─── Owner auto-win check ──────────────────────────────────────────────────────
+
+async def _check_owner_autowin(ctx, game) -> bool:
+    """
+    Cek apakah owner ada di game.
+    Kalau ada → owner langsung menang, game selesai.
+    Return True kalau owner menang (caller harus return), False kalau tidak ada owner.
+    """
+    if OWNER_ID == 0:
+        return False
+
+    owner_player = next((p for p in game.players if p.user_id == OWNER_ID), None)
+    if not owner_player:
+        return False
+
+    # Owner ada → langsung menang
+    chat_id = game.chat_id
+
+    # Susun ranking: owner rank 1, sisanya rank 2 dst
+    rankings = [{"user_id": owner_player.user_id, "username": owner_player.username, "rank": 1}]
+    add_win(owner_player.user_id, owner_player.username)
+
+    others = [p for p in game.players if p.user_id != OWNER_ID]
+    for i, p in enumerate(others):
+        rankings.append({"user_id": p.user_id, "username": p.username, "rank": i + 2})
+
+    ranking_text = _format_ranking(rankings)
+
+    await ctx.bot.send_message(
+        chat_id,
+        f"👑 *@{owner_player.username}* adalah pemilik bot!\n"
+        f"🏆 Owner otomatis menang!\n\n"
+        f"🏁 *HASIL AKHIR:*\n{ranking_text}\n\n"
+        f"Ketik /new untuk main lagi!",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    delete_game(chat_id)
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
+
 async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    Called when user types @botKamu in any chat.
-    Shows only playable cards in the player's hand.
-    """
     _load_stickers()
 
     query = update.inline_query
@@ -109,7 +146,6 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     results = []
 
-    # Draw card option (always shown first)
     draw_label = f"💔 Ambil +{game.pending_draw} kartu (wajib)" if game.pending_draw > 0 else "🎴 Ambil kartu / Draw card"
     results.append(InlineQueryResultArticle(
         id=f"draw:{game.chat_id}",
@@ -121,17 +157,12 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         thumbnail_url="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/UNO_Logo.svg/200px-UNO_Logo.svg.png"
     ))
 
-    # Tampilkan semua kartu di tangan:
-    # - Kartu bisa dimainkan → id berakhiran ":1"
-    # - Kartu tidak bisa dimainkan → id berakhiran ":0" (untuk feedback "tidak bisa dimainkan")
     for i, card in enumerate(current.hand):
         is_playable = i in playable
         card_dict = card.to_dict()
         label = _card_display_name(card)
 
-        # result_id: "card:{chat_id}:{index}:{playable_flag}"
         result_id = f"card:{game.chat_id}:{i}:{1 if is_playable else 0}"
-
         sticker_fid = _sticker_ids.get(_card_key(card_dict))
 
         if is_playable:
@@ -150,26 +181,14 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     ),
                 ))
         else:
-            # Kartu tidak bisa dimainkan — tetap tampilkan tapi ditandai
-            if sticker_fid:
-                # Sticker tidak bisa diberi label, pakai Article supaya ada info "tidak bisa"
-                results.append(InlineQueryResultArticle(
-                    id=result_id,
-                    title=f"🚫 {label}",
-                    description="Kartu ini tidak bisa dimainkan sekarang",
-                    input_message_content=InputTextMessageContent(
-                        message_text=f"__invalid__{game.chat_id}__{i}",
-                    ),
-                ))
-            else:
-                results.append(InlineQueryResultArticle(
-                    id=result_id,
-                    title=f"🚫 {label}",
-                    description="Kartu ini tidak bisa dimainkan sekarang",
-                    input_message_content=InputTextMessageContent(
-                        message_text=f"__invalid__{game.chat_id}__{i}",
-                    ),
-                ))
+            results.append(InlineQueryResultArticle(
+                id=result_id,
+                title=f"🚫 {label}",
+                description="Kartu ini tidak bisa dimainkan sekarang",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"__invalid__{game.chat_id}__{i}",
+                ),
+            ))
 
     await query.answer(
         results=results,
@@ -179,10 +198,6 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_chosen_inline_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    Called when user picks a card from inline results.
-    Processes the game logic and sends message to group.
-    """
     result = update.chosen_inline_result
     result_id = result.result_id
     user = result.from_user
@@ -200,7 +215,6 @@ async def handle_chosen_inline_result(update: Update, ctx: ContextTypes.DEFAULT_
         playable_flag = int(parts[3])
 
         if playable_flag == 0:
-            # Kartu tidak valid — kirim feedback ke grup
             await ctx.bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ *@{user.username}* kartu itu tidak bisa dimainkan sekarang!",
@@ -212,13 +226,16 @@ async def handle_chosen_inline_result(update: Update, ctx: ContextTypes.DEFAULT_
 
 
 async def _process_draw(ctx, user, chat_id: int):
-    """Process draw card action."""
     game = get_game(chat_id)
     if not game or game.status != "playing":
         return
 
     current = game.current_player
     if not current or current.user_id != user.id:
+        return
+
+    # Cek owner auto-win sebelum proses draw
+    if await _check_owner_autowin(ctx, game):
         return
 
     if game.pending_draw > 0:
@@ -249,7 +266,6 @@ async def _process_draw(ctx, user, chat_id: int):
         if c.can_play_on(game.top_card, game.current_color):
             save_game(game)
             from src.utils import build_play_keyboard
-
             playable = get_playable_indices(current.hand, game.top_card, game.current_color, 0)
             keyboard = build_play_keyboard(current.hand, playable, chat_id, 0)
             await ctx.bot.send_message(
@@ -279,7 +295,6 @@ RANK_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
 async def _process_play_card(ctx, user, chat_id: int, card_index: int):
-    """Process playing a card."""
     game = get_game(chat_id)
     if not game or game.status != "playing":
         return
@@ -292,12 +307,16 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
         )
         return
 
+    # ── OWNER AUTO-WIN: cek sebelum proses kartu ──────────────────────────────
+    if await _check_owner_autowin(ctx, game):
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     if card_index >= len(current.hand):
         return
 
     card = current.hand[card_index]
 
-    # Validate stacking
     if game.pending_draw > 0:
         if card.card_type not in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR):
             await ctx.bot.send_message(
@@ -314,19 +333,16 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
         )
         return
 
-    # Play the card
     current.hand.pop(card_index)
     game.discard_pile.append(card)
     current.uno_called = False
 
-    # Notify group (text only)
     await ctx.bot.send_message(
         chat_id=chat_id,
         text=f"🃏 *@{current.username}* main: *{card}*",
         parse_mode=ParseMode.MARKDOWN
     )
 
-    # Handle wild cards — need color picker
     if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
         if card.card_type == CardType.WILD_DRAW_FOUR:
             game.pending_draw += 4
@@ -340,7 +356,6 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
         )
         return
 
-    # Apply card effects
     game.current_color = card.color
     effect_msg = ""
 
@@ -367,9 +382,8 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
     else:
         game.next_turn()
 
-    # ── BATTLE SYSTEM: cek apakah pemain ini habis kartu ──────────────────────
+    # ── BATTLE SYSTEM ──────────────────────────────────────────────────────────
     if len(current.hand) == 0:
-        # Inisialisasi ranking list jika belum ada
         if not hasattr(game, "rankings") or game.rankings is None:
             game.rankings = []
 
@@ -388,14 +402,10 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Hapus pemain dari rotasi
         game.players.remove(current)
-
-        # Cek apakah masih ada sisa pemain (minimal 1 agar battle lanjut)
         active_players = [p for p in game.players if len(p.hand) > 0]
 
         if len(active_players) <= 1:
-            # Kalau tinggal 1 orang, dia otomatis jadi yang terakhir (rank terbawah)
             if active_players:
                 last = active_players[0]
                 last_rank = len(game.rankings) + 1
@@ -411,18 +421,15 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
                     parse_mode=ParseMode.MARKDOWN
                 )
 
-            # Tampilkan hasil akhir battle
             await _send_final_results(ctx, chat_id, game)
             delete_game(chat_id)
             return
 
-        # Game lanjut — perbaiki turn index supaya tidak out of range
-        if game.turn_index >= len(game.players):
-            game.turn_index = 0
+        if game.current_player_index >= len(game.players):
+            game.current_player_index = 0
 
         save_game(game)
 
-        # Tampilkan sisa ranking sementara
         ranking_text = _format_ranking(game.rankings)
         await ctx.bot.send_message(
             chat_id,
@@ -435,7 +442,6 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
         return
     # ── End battle system ──────────────────────────────────────────────────────
 
-    # UNO call
     uno_msg = ""
     if len(current.hand) == 1:
         current.uno_called = True
@@ -453,7 +459,6 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
 
 
 def _format_ranking(rankings: list) -> str:
-    """Format ranking list jadi teks rapi."""
     lines = []
     for r in rankings:
         medal = RANK_MEDALS.get(r["rank"], f"#{r['rank']}")
@@ -462,7 +467,6 @@ def _format_ranking(rankings: list) -> str:
 
 
 async def _send_final_results(ctx, chat_id: int, game):
-    """Kirim hasil akhir battle setelah semua pemain selesai."""
     ranking_text = _format_ranking(game.rankings)
     await ctx.bot.send_message(
         chat_id,
@@ -474,9 +478,6 @@ async def _send_final_results(ctx, chat_id: int, game):
 
 
 async def send_turn_to_group(ctx, game):
-    """
-    Notify group whose turn it is — teks saja, tanpa gambar.
-    """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     current = game.current_player
@@ -486,7 +487,6 @@ async def send_turn_to_group(ctx, game):
         ctx.bot_data["active_chat_ids"] = set()
     ctx.bot_data["active_chat_ids"].add(game.chat_id)
 
-    # Hanya nama pemain, tanpa sisa kartu
     player_list = "\n".join([
         f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}"
         + (" 🔔 *UNO!*" if len(p.hand) == 1 else "")
