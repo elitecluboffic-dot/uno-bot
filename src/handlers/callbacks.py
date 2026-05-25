@@ -5,8 +5,7 @@ import io
 
 from src.game import get_game, save_game, delete_game, draw_card, add_win, add_game_played
 from src.cards import Card, Color, CardType
-from src.utils import build_color_keyboard, get_playable_indices
-from src.handlers.inline import send_turn_to_group  # pakai yang baru
+from src.utils import build_color_keyboard, get_playable_indices, send_turn_to_group  # ✅ dari utils, bukan inline
 
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
