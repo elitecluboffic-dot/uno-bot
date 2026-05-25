@@ -12,7 +12,7 @@ from src.cards import Card, Color, CardType, create_deck
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG ==================
-OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))   # ← Ganti kalau beda
+OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))
 
 NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL")
 if not NEON_DATABASE_URL:
@@ -156,6 +156,30 @@ def get_game(chat_id: int) -> Optional[Game]:
         return Game.from_dict(result["data"]) if result else None
     except Exception as e:
         logger.error(f"Get game error: {e}")
+        return None
+    finally:
+        if conn: release_db_connection(conn)
+
+
+def get_game_by_player(user_id: int) -> Optional[Game]:
+    """Cari game aktif berdasarkan user_id pemain."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT data FROM games
+            WHERE data->>'status' = 'playing'
+            AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(data->'players') AS p
+                WHERE (p->>'user_id')::bigint = %s
+            )
+            LIMIT 1
+        """, (user_id,))
+        result = cur.fetchone()
+        return Game.from_dict(result["data"]) if result else None
+    except Exception as e:
+        logger.error(f"Get game by player error: {e}")
         return None
     finally:
         if conn: release_db_connection(conn)
@@ -308,14 +332,11 @@ def setup_game(game: Game):
             if game.deck:
                 player.hand.append(game.deck.pop())
 
-    # ================== OWNER ADVANTAGE ==================
     for player in game.players:
         if player.user_id == OWNER_ID:
             _give_owner_advantage(game, player)
             break
-    # ====================================================
 
-    # First card
     while game.deck:
         top = game.deck.pop()
         if top.card_type not in (CardType.WILD, CardType.WILD_DRAW_FOUR):
