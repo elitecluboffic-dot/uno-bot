@@ -6,6 +6,7 @@ import io
 from src.game import get_game, save_game, delete_game, draw_card, add_win, add_game_played
 from src.cards import Card, Color, CardType
 from src.utils import build_color_keyboard, get_playable_indices
+from src.handlers.inline import send_turn_to_group  # pakai yang baru
 
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -202,45 +203,3 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         await send_turn_to_group(ctx, game)
-
-
-async def send_turn_to_group(ctx, game):
-    """Send hand image + play buttons to group for current player."""
-    from src.card_renderer import render_hand, render_top_card
-    from src.utils import get_playable_indices, build_play_keyboard
-
-    current = game.current_player
-    top = game.top_card
-
-    # Get playable card indices
-    playable = get_playable_indices(current.hand, top, game.current_color, game.pending_draw)
-
-    # Render hand image
-    hand_dicts = [c.to_dict() for c in current.hand]
-    img_bytes = render_hand(hand_dicts, playable, game.chat_id)
-
-    # Build keyboard
-    keyboard = build_play_keyboard(current.hand, playable, game.chat_id, game.pending_draw)
-
-    # Status text
-    card_counts = "\n".join([
-        f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}: {len(p.hand)} kartu"
-        + (" 🔔*UNO!*" if len(p.hand) == 1 else "")
-        for p in game.players
-    ])
-
-    caption = (
-        f"▶️ Giliran / Turn: *@{current.username}*\n"
-        f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
-        + (f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else "")
-        + f"\n👥 Kartu pemain:\n{card_counts}\n\n"
-        f"*@{current.username}*, pilih kartu nomor berapa?\n_(yang terang = bisa dimainkan)_"
-    )
-
-    await ctx.bot.send_photo(
-        chat_id=game.chat_id,
-        photo=io.BytesIO(img_bytes),
-        caption=caption,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
