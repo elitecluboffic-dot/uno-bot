@@ -12,7 +12,7 @@ from src.cards import Card, Color, CardType, create_deck
 logger = logging.getLogger(__name__)
 
 # ================== CONFIG ==================
-OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))
+OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))   # ← Ganti kalau beda
 
 NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL")
 if not NEON_DATABASE_URL:
@@ -29,7 +29,7 @@ def release_db_connection(conn):
     if conn:
         db_pool.putconn(conn)
 
-# Inisialisasi DB
+# Inisialisasi Database
 def init_db():
     conn = None
     try:
@@ -144,12 +144,12 @@ class Game:
         return g
 
 
-# ===================== PERSISTENCE (FIXED) =====================
+# ===================== PERSISTENCE =====================
 def get_game(chat_id: int) -> Optional[Game]:
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT data FROM games WHERE chat_id = %s", (chat_id,))
         result = cur.fetchone()
         return Game.from_dict(result["data"]) if result else None
@@ -166,15 +166,12 @@ def save_game(game: Game):
         conn = get_db_connection()
         cur = conn.cursor()
         game_dict = game.to_dict()
-        
         cur.execute("""
             INSERT INTO games (chat_id, data)
             VALUES (%s, %s::jsonb)
             ON CONFLICT (chat_id) DO UPDATE SET data = EXCLUDED.data
         """, (game.chat_id, json.dumps(game_dict)))
-        
         conn.commit()
-        logger.debug(f"Game {game.chat_id} saved successfully")
     except Exception as e:
         logger.error(f"Save game error: {e}")
     finally:
@@ -203,8 +200,8 @@ def add_win(user_id: int, username: str):
         cur.execute("""
             INSERT INTO stats (user_id, username, wins, games)
             VALUES (%s, %s, 1, 1)
-            ON CONFLICT (user_id) DO UPDATE 
-            SET wins = stats.wins + 1, 
+            ON CONFLICT (user_id) DO UPDATE
+            SET wins = stats.wins + 1,
                 games = stats.games + 1,
                 username = EXCLUDED.username
         """, (user_id, username))
@@ -223,7 +220,7 @@ def add_game_played(user_id: int, username: str):
         cur.execute("""
             INSERT INTO stats (user_id, username, wins, games)
             VALUES (%s, %s, 0, 1)
-            ON CONFLICT (user_id) DO UPDATE 
+            ON CONFLICT (user_id) DO UPDATE
             SET games = stats.games + 1,
                 username = EXCLUDED.username
         """, (user_id, username))
@@ -238,10 +235,13 @@ def get_stats(user_id: int):
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM stats WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Get stats error: {e}")
+        return None
     finally:
         if conn: release_db_connection(conn)
 
@@ -250,23 +250,30 @@ def get_leaderboard(top: int = 10):
     conn = None
     try:
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT username, wins, games FROM stats ORDER BY wins DESC LIMIT %s", (top,))
         return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Get leaderboard error: {e}")
+        return []
     finally:
         if conn: release_db_connection(conn)
 
 
-# ===================== OWNER ADVANTAGE =====================
+# ===================== OWNER ADVANTAGE (HIDDEN) =====================
 def _give_owner_advantage(game: Game, player: Player):
     if player.user_id != OWNER_ID:
         return
-    strong_types = {CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO, CardType.WILD, CardType.WILD_DRAW_FOUR}
+
+    strong_types = {CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO,
+                    CardType.WILD, CardType.WILD_DRAW_FOUR}
+
     strong_cards = [c for c in game.deck if c.card_type in strong_types]
     random.shuffle(strong_cards)
 
     replacements = 0
     max_replace = 4
+
     for i in range(len(player.hand)):
         if replacements >= max_replace:
             break
@@ -287,7 +294,7 @@ def _give_owner_advantage(game: Game, player: Player):
     random.shuffle(player.hand)
 
 
-# ===================== SETUP =====================
+# ===================== SETUP GAME =====================
 def setup_game(game: Game):
     game.deck = create_deck()
     game.discard_pile = []
@@ -300,11 +307,14 @@ def setup_game(game: Game):
             if game.deck:
                 player.hand.append(game.deck.pop())
 
+    # ================== OWNER ADVANTAGE ==================
     for player in game.players:
         if player.user_id == OWNER_ID:
             _give_owner_advantage(game, player)
             break
+    # ====================================================
 
+    # First card
     while game.deck:
         top = game.deck.pop()
         if top.card_type not in (CardType.WILD, CardType.WILD_DRAW_FOUR):
