@@ -401,12 +401,20 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
 async def send_turn_to_group(ctx, game):
     """
     Notify group whose turn it is.
-    Sends top card image + "Make your choice!" button that opens inline query.
+    - Kirim top card + tombol 'Make your choice!' ke GRUP
+    - Kirim hand image ke DM pemain (private, biar lawan tidak lihat)
     """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from src.card_renderer import render_hand
+    from src.utils import get_playable_indices
 
     current = game.current_player
     top = game.top_card
+
+    # Register this chat as active
+    if "active_chat_ids" not in ctx.bot_data:
+        ctx.bot_data["active_chat_ids"] = set()
+    ctx.bot_data["active_chat_ids"].add(game.chat_id)
 
     card_counts = "\n".join([
         f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}: {len(p.hand)} kartu"
@@ -416,13 +424,6 @@ async def send_turn_to_group(ctx, game):
 
     pending_msg = f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else ""
 
-    # Register this chat as active
-    if "active_chat_ids" not in ctx.bot_data:
-        ctx.bot_data["active_chat_ids"] = set()
-    ctx.bot_data["active_chat_ids"].add(game.chat_id)
-
-    bot_username = (await ctx.bot.get_me()).username
-
     caption = (
         f"▶️ Giliran / Turn: *@{current.username}*\n"
         f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
@@ -430,7 +431,7 @@ async def send_turn_to_group(ctx, game):
         f"\n👥 Kartu pemain:\n{card_counts}"
     )
 
-    # Button "Make your choice!" — tap langsung buka inline query @bot
+    # Tombol "Make your choice!" di grup — tap langsung buka inline query
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "🃏 Make your choice!",
@@ -438,7 +439,7 @@ async def send_turn_to_group(ctx, game):
         )
     ]])
 
-    # Send top card image + button
+    # Kirim top card + tombol ke GRUP
     top_img = render_top_card(top.to_dict())
     await ctx.bot.send_photo(
         chat_id=game.chat_id,
@@ -447,6 +448,33 @@ async def send_turn_to_group(ctx, game):
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
+
+    # Kirim hand image ke DM pemain (biar lawan tidak bisa lihat)
+    playable = get_playable_indices(current.hand, top, game.current_color, game.pending_draw)
+    hand_dicts = [c.to_dict() for c in current.hand]
+    hand_img = render_hand(hand_dicts, playable, game.chat_id)
+
+    try:
+        await ctx.bot.send_photo(
+            chat_id=current.user_id,
+            photo=io.BytesIO(hand_img),
+            caption=(
+                f"🃏 Kartu kamu — giliran sekarang!\n"
+                f"Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
+                f"{pending_msg}"
+                f"_(terang = bisa dimainkan, tap 'Make your choice!' di grup)_"
+            ),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception:
+        # DM gagal — pemain belum pernah /start bot di DM
+        # Kirim notif ke grup
+        await ctx.bot.send_message(
+            game.chat_id,
+            f"⚠️ *@{current.username}*, start dulu bot ini di DM agar kartu dikirim private!\n"
+            f"Tap: @{(await ctx.bot.get_me()).username}",
+            parse_mode=ParseMode.MARKDOWN
+        )
 
 
 def _card_display_name(card: Card) -> str:
