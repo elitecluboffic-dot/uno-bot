@@ -9,7 +9,7 @@ Alur:
 Perubahan:
 - Tap kartu tidak valid → bot balas "❌ kartu ini tidak bisa dimainkan"
 - Sistem battle: pemain yang habis kartu masuk ranking, game lanjut sampai semua selesai
-- Owner auto-win: kalau owner ada di game, owner langsung menang saat game dimulai
+- Owner autowin DIHAPUS: semua pemain main normal
 """
 
 import json
@@ -37,8 +37,6 @@ logger = logging.getLogger(__name__)
 STICKER_FILE = "data/sticker_ids.json"
 _sticker_ids: dict = {}
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-
 
 def _load_stickers():
     """Load sticker file_ids dari JSON, sekali saja."""
@@ -55,48 +53,6 @@ def _card_key(card_dict: dict) -> str:
     if ct == "NUMBER":
         return f"{color}_{num}"
     return f"{color}_{ct}"
-
-
-# ─── Owner auto-win check ──────────────────────────────────────────────────────
-
-async def _check_owner_autowin(ctx, game) -> bool:
-    """
-    Cek apakah owner ada di game.
-    Kalau ada → owner langsung menang, game selesai.
-    Return True kalau owner menang (caller harus return), False kalau tidak ada owner.
-    """
-    if OWNER_ID == 0:
-        return False
-
-    owner_player = next((p for p in game.players if p.user_id == OWNER_ID), None)
-    if not owner_player:
-        return False
-
-    # Owner ada → langsung menang
-    chat_id = game.chat_id
-
-    # Susun ranking: owner rank 1, sisanya rank 2 dst
-    rankings = [{"user_id": owner_player.user_id, "username": owner_player.username, "rank": 1}]
-    add_win(owner_player.user_id, owner_player.username)
-
-    others = [p for p in game.players if p.user_id != OWNER_ID]
-    for i, p in enumerate(others):
-        rankings.append({"user_id": p.user_id, "username": p.username, "rank": i + 2})
-
-    ranking_text = _format_ranking(rankings)
-
-    await ctx.bot.send_message(
-        chat_id,
-        f"🏁 *GAME SELESAI! HASIL BATTLE:*\n\n"
-        f"{ranking_text}\n\n"
-        f"Ketik /new untuk main lagi!",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    delete_game(chat_id)
-    return True
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -233,10 +189,6 @@ async def _process_draw(ctx, user, chat_id: int):
     if not current or current.user_id != user.id:
         return
 
-    # Cek owner auto-win sebelum proses draw
-    if await _check_owner_autowin(ctx, game):
-        return
-
     if game.pending_draw > 0:
         for _ in range(game.pending_draw):
             c = draw_card(game)
@@ -305,11 +257,6 @@ async def _process_play_card(ctx, user, chat_id: int, card_index: int):
             f"❌ @{user.username} bukan giliran kamu!"
         )
         return
-
-    # ── OWNER AUTO-WIN: cek sebelum proses kartu ──────────────────────────────
-    if await _check_owner_autowin(ctx, game):
-        return
-    # ─────────────────────────────────────────────────────────────────────────
 
     if card_index >= len(current.hand):
         return
