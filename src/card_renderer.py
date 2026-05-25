@@ -2,110 +2,191 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import os
 
-FONT_BOLD = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
+# Try to load font from multiple locations
+_FONT_PATHS = [
+    os.path.join(os.path.dirname(__file__), "Poppins-Bold.ttf"),
+    os.path.join(os.path.dirname(__file__), "fonts", "Poppins-Bold.ttf"),
+    "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+]
 
-CARD_W, CARD_H = 200, 300
-HAND_COLS = 4  # cards per row in hand image
+FONT_BOLD = None
+for path in _FONT_PATHS:
+    if os.path.exists(path):
+        FONT_BOLD = path
+        break
 
+# Card dimensions (portrait, like real UNO card ratio)
+CARD_W, CARD_H = 240, 360
+HAND_COLS = 4
+
+# Colors matching real UNO cards
 COLOR_PALETTE = {
-    "RED":    ("#C0392B", "#E74C3C"),
-    "GREEN":  ("#1E8449", "#27AE60"),
-    "BLUE":   ("#1A5276", "#2980B9"),
-    "YELLOW": ("#D4AC0D", "#F1C40F"),
+    "RED":    ("#C1272D", "#E8333A"),   # dark bg, light oval
+    "GREEN":  ("#008751", "#00A85E"),
+    "BLUE":   ("#0057A8", "#006FD6"),
+    "YELLOW": ("#F5A800", "#FFCC00"),
     "WILD":   ("#1a1a1a", "#2c2c2c"),
 }
 
+# Color initials for corner (like @unobot)
+COLOR_INITIAL = {
+    "RED": "R",
+    "GREEN": "G",
+    "BLUE": "B",
+    "YELLOW": "Y",
+    "WILD": "W",
+}
+
+
 def _font(size):
+    if FONT_BOLD:
+        try:
+            return ImageFont.truetype(FONT_BOLD, size)
+        except Exception:
+            pass
     try:
-        return ImageFont.truetype(FONT_BOLD, size)
-    except:
+        return ImageFont.load_default(size=size)
+    except Exception:
         return ImageFont.load_default()
 
 
+def _draw_centered_text(draw, text, font, cx, cy, fill="white", shadow_fill=(0, 0, 0, 100)):
+    """Draw text centered at (cx, cy) with drop shadow."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    tx = cx - tw // 2 - bbox[0]
+    ty = cy - th // 2 - bbox[1]
+    # Shadow
+    draw.text((tx + 3, ty + 3), text, font=font, fill=shadow_fill)
+    # Main text
+    draw.text((tx, ty), text, font=font, fill=fill)
+
+
 def _draw_single_card(color_name: str, center_label: str, corner_label: str) -> Image.Image:
+    """Draw a single UNO card mimicking the @unobot sticker style."""
     dark, light = COLOR_PALETTE.get(color_name, COLOR_PALETTE["WILD"])
 
     img = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # Background
-    r = 22
-    d.rounded_rectangle([0, 0, CARD_W, CARD_H], radius=r, fill=dark)
-    # White border
-    d.rounded_rectangle([5, 5, CARD_W-5, CARD_H-5], radius=r-3, outline="white", width=4)
+    # --- Card background with rounded corners ---
+    radius = 28
+    d.rounded_rectangle([0, 0, CARD_W - 1, CARD_H - 1], radius=radius, fill=dark)
+
+    # --- White border ---
+    border = 6
+    d.rounded_rectangle(
+        [border, border, CARD_W - border - 1, CARD_H - border - 1],
+        radius=radius - 3,
+        outline="white",
+        width=5
+    )
+
+    cx = CARD_W // 2
+    cy = CARD_H // 2
 
     if color_name == "WILD":
-        # 4-color oval
-        ox1, oy1, ox2, oy2 = 20, 42, CARD_W-20, CARD_H-42
-        cx = (ox1+ox2)//2
-        cy = (oy1+oy2)//2
+        # --- 4-color oval for WILD ---
+        ox1, oy1 = 22, 50
+        ox2, oy2 = CARD_W - 22, CARD_H - 50
+        ocx = (ox1 + ox2) // 2
+        ocy = (oy1 + oy2) // 2
 
+        # Build 4-quadrant oval
         mask = Image.new("L", (CARD_W, CARD_H), 0)
         ImageDraw.Draw(mask).ellipse([ox1, oy1, ox2, oy2], fill=255)
 
-        quad = Image.new("RGBA", (CARD_W, CARD_H), (0,0,0,0))
+        quad = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
         qd = ImageDraw.Draw(quad)
-        # TL red, TR blue, BR yellow, BL green
-        qd.ellipse([ox1, oy1, ox2, oy2], fill="#C0392B")
-        qd.rectangle([cx, oy1, ox2, cy], fill="#2980B9")
-        qd.rectangle([cx, cy, ox2, oy2], fill="#F1C40F")
-        qd.rectangle([ox1, cy, cx, oy2], fill="#27AE60")
+        qd.ellipse([ox1, oy1, ox2, oy2], fill="#C1272D")
+        qd.rectangle([ocx, oy1, ox2, ocy], fill="#0057A8")
+        qd.rectangle([ocx, ocy, ox2, oy2], fill="#FFCC00")
+        qd.rectangle([ox1, ocy, ocx, oy2], fill="#008751")
 
-        out = Image.new("RGBA", (CARD_W, CARD_H), (0,0,0,0))
+        out = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
         out.paste(quad, mask=mask)
         img.paste(out, mask=out.split()[3])
 
         d = ImageDraw.Draw(img)
-        d.ellipse([ox1+2, oy1+2, ox2-2, oy2-2], outline="white", width=3)
+        d.ellipse([ox1 + 3, oy1 + 3, ox2 - 3, oy2 - 3], outline="white", width=4)
 
-        # Center text
-        txt = center_label
-        fnt = _font(36 if len(txt) <= 4 else 28)
-        bbox = d.textbbox((0,0), txt, font=fnt)
-        tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
-        tx = (CARD_W-tw)//2 - bbox[0]
-        ty = (CARD_H-th)//2 - bbox[1]
-        d.text((tx+2, ty+2), txt, font=fnt, fill=(0,0,0,100))
-        d.text((tx, ty), txt, font=fnt, fill="white")
+        # Center text on wild card
+        if center_label not in ("WILD", "+4"):
+            fnt = _font(32)
+            _draw_centered_text(d, center_label, fnt, cx, cy)
 
     else:
-        # Outer oval (light)
-        ox1, oy1, ox2, oy2 = 16, 38, CARD_W-16, CARD_H-38
-        d.ellipse([ox1, oy1, ox2, oy2], fill=light)
-        # Inner oval (dark) — slightly tilted effect
-        pad = 14
-        d.ellipse([ox1+pad, oy1+pad, ox2-pad, oy2-pad], fill=dark)
+        # --- White outer oval ---
+        ox1, oy1 = 18, 45
+        ox2, oy2 = CARD_W - 18, CARD_H - 45
 
-        # Center label
-        fnt_size = 80 if len(center_label) == 1 else (56 if len(center_label) == 2 else 40)
+        # Draw tilted oval effect: white oval, then colored inner oval slightly offset
+        # White oval background
+        d.ellipse([ox1, oy1, ox2, oy2], fill="white")
+
+        # Colored inner oval (slightly tilted = offset)
+        tilt = 12
+        d.ellipse([ox1 + tilt, oy1 + tilt, ox2 - tilt, oy2 - tilt], fill=dark)
+
+        # --- Center number/symbol ---
+        if len(center_label) == 1:
+            fnt_size = 130
+        elif len(center_label) == 2:
+            fnt_size = 95
+        else:
+            fnt_size = 65
+
         fnt = _font(fnt_size)
-        bbox = d.textbbox((0,0), center_label, font=fnt)
-        tw, th = bbox[2]-bbox[0], bbox[3]-bbox[1]
-        tx = (CARD_W-tw)//2 - bbox[0]
-        ty = (CARD_H-th)//2 - bbox[1]
-        d.text((tx+3, ty+3), center_label, font=fnt, fill=(0,0,0,80))
-        d.text((tx, ty), center_label, font=fnt, fill="white")
+        _draw_centered_text(d, center_label, fnt, cx, cy)
 
-    # Corner labels
-    fnt_c = _font(26)
-    d.text((10, 6), corner_label, font=fnt_c, fill="white")
-    bbox2 = d.textbbox((0,0), corner_label, font=fnt_c)
-    cw = bbox2[2]-bbox2[0]
-    ch = bbox2[3]-bbox2[1]
-    d.text((CARD_W-10-cw, CARD_H-8-ch), corner_label, font=fnt_c, fill="white")
+    # --- Corner labels (top-left and bottom-right, rotated 180 for bottom) ---
+    # Use color initial + card value like @unobot: "R4", "G+2", etc.
+    initial = COLOR_INITIAL.get(color_name, "")
+    top_label = f"{initial}\n{corner_label}" if color_name != "WILD" else corner_label
+
+    fnt_corner = _font(28)
+    margin_x = 12
+    margin_y = 10
+
+    # Top-left
+    _draw_multiline_corner(d, top_label, fnt_corner, margin_x, margin_y, "white")
+
+    # Bottom-right (rotated 180°) — draw on temp image then rotate
+    corner_img = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(corner_img)
+    _draw_multiline_corner(cd, top_label, fnt_corner, margin_x, margin_y, "white")
+    corner_img = corner_img.rotate(180)
+    img = Image.alpha_composite(img, corner_img)
 
     return img
 
 
+def _draw_multiline_corner(draw, text, font, x, y, fill):
+    """Draw multiline corner label (e.g. 'R' on line 1, '4' on line 2)."""
+    lines = text.split("\n")
+    cur_y = y
+    for line in lines:
+        if not line:
+            continue
+        draw.text((x, cur_y), line, font=font, fill=fill)
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_h = bbox[3] - bbox[1]
+        cur_y += line_h + 2
+
+
 def _card_labels(card_dict: dict) -> tuple[str, str]:
+    """Return (center_label, corner_label) for a card dict."""
     ct = card_dict["card_type"]
     num = card_dict.get("number")
     if ct == "NUMBER":
         return str(num), str(num)
     elif ct == "SKIP":
-        return "Skip", "⊘"
+        return "⊘", "⊘"
     elif ct == "REVERSE":
-        return "Rev", "↺"
+        return "↺", "↺"
     elif ct == "DRAW_TWO":
         return "+2", "+2"
     elif ct == "WILD":
@@ -116,32 +197,45 @@ def _card_labels(card_dict: dict) -> tuple[str, str]:
 
 
 def render_top_card(card_dict: dict) -> bytes:
-    """Render a single card as PNG bytes."""
+    """Render a single card as PNG bytes (2x size for top card display)."""
     center, corner = _card_labels(card_dict)
     color = card_dict["color"]
     img = _draw_single_card(color, center, corner)
-    # Scale up a bit for top card
-    img = img.resize((CARD_W*2, CARD_H*2), Image.LANCZOS)
+    img = img.resize((CARD_W * 2, CARD_H * 2), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
+def render_card_sticker(card_dict: dict) -> bytes:
+    """Render a single card as WebP sticker bytes."""
+    center, corner = _card_labels(card_dict)
+    color = card_dict["color"]
+    img = _draw_single_card(color, center, corner)
+    # Stickers must be 512x512
+    img = img.resize((512, 512), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP")
+    return buf.getvalue()
+
+
 def render_hand(cards: list[dict], playable_indices: list[int], chat_id: int) -> bytes:
-    """Render all cards in hand as a grid image."""
+    """Render all cards in hand as a grid PNG image."""
     n = len(cards)
+
     if n == 0:
         img = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 30, 255))
         d = ImageDraw.Draw(img)
-        d.text((20, CARD_H//2), "No cards", font=_font(28), fill="white")
+        fnt = _font(28)
+        _draw_centered_text(d, "No cards", fnt, CARD_W // 2, CARD_H // 2)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
 
     cols = min(HAND_COLS, n)
     rows = (n + cols - 1) // cols
-    pad = 10
-    bg_color = (25, 25, 25, 255)
+    pad = 12
+    bg_color = (20, 20, 20, 255)
 
     total_w = cols * CARD_W + (cols + 1) * pad
     total_h = rows * CARD_H + (rows + 1) * pad
@@ -160,20 +254,28 @@ def render_hand(cards: list[dict], playable_indices: list[int], chat_id: int) ->
 
         # Dim unplayable cards
         if i not in playable_indices:
-            dark_overlay = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 140))
-            card_img = Image.alpha_composite(card_img, dark_overlay)
+            overlay = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 160))
+            card_img = Image.alpha_composite(card_img, overlay)
 
-        # Add index number overlay
+        # Gold badge with card number
         d_overlay = ImageDraw.Draw(card_img)
-        num_fnt = _font(20)
         num_label = str(i + 1)
-        # Badge circle
-        bx, by = CARD_W - 30, 6
-        d_overlay.ellipse([bx, by, bx+24, by+24], fill="#FFD700")
-        bbox = d_overlay.textbbox((0,0), num_label, font=num_fnt)
-        nw = bbox[2]-bbox[0]
-        nh = bbox[3]-bbox[1]
-        d_overlay.text((bx + (24-nw)//2, by + (24-nh)//2 - bbox[1]), num_label, font=num_fnt, fill="#1a1a1a")
+        num_fnt = _font(22)
+        badge_size = 30
+        bx = CARD_W - badge_size - 6
+        by = 6
+        # Badge background
+        d_overlay.ellipse([bx, by, bx + badge_size, by + badge_size], fill="#FFD700")
+        # Badge border
+        d_overlay.ellipse([bx, by, bx + badge_size, by + badge_size], outline="#B8860B", width=2)
+        # Badge number
+        bbox = d_overlay.textbbox((0, 0), num_label, font=num_fnt)
+        nw = bbox[2] - bbox[0]
+        nh = bbox[3] - bbox[1]
+        d_overlay.text(
+            (bx + (badge_size - nw) // 2 - bbox[0], by + (badge_size - nh) // 2 - bbox[1]),
+            num_label, font=num_fnt, fill="#1a1a1a"
+        )
 
         img.paste(card_img, (x, y), card_img)
 
