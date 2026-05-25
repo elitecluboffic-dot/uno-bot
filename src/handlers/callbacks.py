@@ -1,10 +1,11 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
+import io
 
 from src.game import get_game, save_game, delete_game, draw_card, add_win, add_game_played
 from src.cards import Card, Color, CardType
-from src.utils import build_hand_keyboard, build_color_keyboard
+from src.utils import build_color_keyboard, get_playable_indices
 
 
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -14,8 +15,6 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user = query.from_user
 
-    # Find game by looking through all chats where user is playing
-    # Data format: action:chat_id:payload
     parts = data.split(":")
     if len(parts) < 2:
         return
@@ -41,162 +40,136 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         card = current.hand[card_index]
 
-        # Check if must respond to pending draw
         if game.pending_draw > 0:
             if card.card_type not in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR):
                 await query.answer(
-                    f"⚠️ Kamu harus stack +{game.pending_draw} atau ambil kartu! / Stack or draw!",
+                    f"⚠️ Stack +{game.pending_draw} atau ambil kartu! / Stack or draw!",
                     show_alert=True
                 )
                 return
 
         if not card.can_play_on(game.top_card, game.current_color):
-            await query.answer("❌ Kartu tidak bisa dimainkan! / Card can't be played!", show_alert=True)
+            await query.answer("❌ Kartu tidak bisa dimainkan! / Can't play this card!", show_alert=True)
             return
 
-        # Play card
         current.hand.pop(card_index)
         game.discard_pile.append(card)
         current.uno_called = False
 
-        # Handle card effects
         if card.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR):
-            # Ask for color
             if card.card_type == CardType.WILD_DRAW_FOUR:
                 game.pending_draw += 4
             save_game(game)
-            keyboard = build_color_keyboard(chat_id, card_index)
+            keyboard = build_color_keyboard(chat_id)
             await query.edit_message_text(
-                f"🌈 Kamu main {card}!\nPilih warna / Choose color:",
+                f"🌈 Pilih warna / Choose color:",
                 reply_markup=keyboard
             )
             return
 
-        # Apply color
         game.current_color = card.color
-
-        msg = f"🃏 @{current.username} main / played: *{card}*\n"
+        msg = f"🃏 *@{current.username}* main: *{card}*\n"
 
         if card.card_type == CardType.SKIP:
             game.next_turn()
             skipped = game.current_player
             msg += f"⏭ @{skipped.username} di-skip!\n"
+            game.next_turn()
 
         elif card.card_type == CardType.REVERSE:
             game.direction *= -1
             if len(game.players) == 2:
                 game.next_turn()
-                skipped = game.current_player
-                msg += f"🔄 Arah dibalik! @{skipped.username} skip!\n"
+                msg += f"🔄 Reverse! @{game.current_player.username} skip!\n"
+                game.next_turn()
             else:
                 msg += "🔄 Arah dibalik! / Direction reversed!\n"
+                game.next_turn()
 
         elif card.card_type == CardType.DRAW_TWO:
             game.pending_draw += 2
+            game.next_turn()
 
-        # Check win
+        else:
+            game.next_turn()
+
         if len(current.hand) == 0:
-            await query.edit_message_text(f"🎉 Kamu menang! / You won! 🏆")
+            await query.edit_message_text("🎉 Kamu menang! / You won!")
             add_win(current.user_id, current.username)
             await ctx.bot.send_message(
                 chat_id,
                 f"🎉🏆 *@{current.username} MENANG! / WINS!* 🏆🎉\n\n"
-                f"Kartu habis! / Cards are empty!\n"
                 f"Ketik /new untuk main lagi! / Type /new to play again!",
                 parse_mode=ParseMode.MARKDOWN
             )
             delete_game(chat_id)
             return
 
-        # Check UNO
         if len(current.hand) == 1:
             current.uno_called = True
             msg += f"🔔 *UNO! @{current.username} tinggal 1 kartu!*\n"
 
-        game.next_turn()
-
-        # Handle pending draw for next player
-        if game.pending_draw > 0 and card.card_type not in (CardType.DRAW_TWO, CardType.WILD_DRAW_FOUR):
-            next_player = game.current_player
-            for _ in range(game.pending_draw):
-                drawn = draw_card(game)
-                if drawn:
-                    next_player.hand.append(drawn)
-            msg += f"💔 @{next_player.username} ambil +{game.pending_draw} kartu!\n"
-            game.pending_draw = 0
-            game.next_turn()
-
         save_game(game)
-        await query.edit_message_text(f"✅ Kartu dimainkan! / Card played!")
-
-        next_p = game.current_player
-        msg += f"\n▶️ Giliran / Turn: *@{next_p.username}*"
-
+        await query.edit_message_text("✅ Dimainkan!")
         await ctx.bot.send_message(chat_id, msg, parse_mode=ParseMode.MARKDOWN)
-        await send_turn_pm(ctx, game)
+        await send_turn_to_group(ctx, game)
 
     elif action == "draw":
         if game.pending_draw > 0:
-            # Must draw pending
             for _ in range(game.pending_draw):
-                card = draw_card(game)
-                if card:
-                    current.hand.append(card)
+                c = draw_card(game)
+                if c:
+                    current.hand.append(c)
             drawn_count = game.pending_draw
             game.pending_draw = 0
             game.next_turn()
             save_game(game)
-
-            await query.edit_message_text(f"💔 Kamu ambil +{drawn_count} kartu! / You drew +{drawn_count} cards!")
+            await query.edit_message_text(f"💔 Kamu ambil +{drawn_count} kartu!")
             next_p = game.current_player
             await ctx.bot.send_message(
                 chat_id,
-                f"💔 @{current.username} ambil +{drawn_count} kartu!\n"
+                f"💔 *@{current.username}* ambil *+{drawn_count}* kartu!\n"
                 f"▶️ Giliran / Turn: *@{next_p.username}*",
                 parse_mode=ParseMode.MARKDOWN
             )
-            await send_turn_pm(ctx, game)
+            await send_turn_to_group(ctx, game)
         else:
-            card = draw_card(game)
-            if not card:
-                await query.answer("❌ Deck kosong! / Deck is empty!", show_alert=True)
+            c = draw_card(game)
+            if not c:
+                await query.answer("❌ Deck kosong!", show_alert=True)
                 return
+            current.hand.append(c)
 
-            current.hand.append(card)
-
-            # Can play the drawn card?
-            if card.can_play_on(game.top_card, game.current_color):
+            if c.can_play_on(game.top_card, game.current_color):
                 save_game(game)
-                keyboard = build_draw_play_keyboard(chat_id, len(current.hand) - 1)
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Main / Play", callback_data=f"play:{chat_id}:{len(current.hand)-1}"),
+                    InlineKeyboardButton("⏩ Simpan / Keep", callback_data=f"skip_draw:{chat_id}:0"),
+                ]])
                 await query.edit_message_text(
-                    f"🎴 Kamu ambil: *{card}*\n\nMau dimainkan? / Play it?",
+                    f"🎴 Kamu ambil: *{c}*\nMau dimainkan? / Play it?",
                     reply_markup=keyboard,
                     parse_mode=ParseMode.MARKDOWN
                 )
-                return
             else:
                 game.next_turn()
                 save_game(game)
-                await query.edit_message_text(f"🎴 Kamu ambil: {card}\nTidak bisa dimainkan, giliran berikutnya.")
+                await query.edit_message_text(f"🎴 Ambil: {c} — tidak bisa dimainkan.")
                 next_p = game.current_player
                 await ctx.bot.send_message(
                     chat_id,
-                    f"🎴 @{current.username} ambil kartu!\n"
-                    f"▶️ Giliran / Turn: *@{next_p.username}*",
+                    f"🎴 *@{current.username}* ambil kartu.\n▶️ Giliran / Turn: *@{next_p.username}*",
                     parse_mode=ParseMode.MARKDOWN
                 )
-                await send_turn_pm(ctx, game)
+                await send_turn_to_group(ctx, game)
 
     elif action == "color":
         color_name = parts[2]
-        chosen_color = Color[color_name]
-        game.current_color = chosen_color
+        game.current_color = Color[color_name]
+        msg = f"🌈 *@{current.username}* pilih: *{game.current_color.value}*\n"
 
-        msg = f"🌈 @{current.username} pilih warna / chose color: *{chosen_color.value}*\n"
-
-        # Check win
         if len(current.hand) == 0:
-            await query.edit_message_text("🎉 Kamu menang! / You won!")
+            await query.edit_message_text("🎉 Kamu menang!")
             add_win(current.user_id, current.username)
             await ctx.bot.send_message(
                 chat_id,
@@ -211,67 +184,63 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             msg += f"🔔 *UNO! @{current.username} tinggal 1 kartu!*\n"
 
         game.next_turn()
-
-        # Handle Wild Draw 4 pending
-        if game.pending_draw > 0:
-            top_card = game.top_card
-            if top_card and top_card.card_type == CardType.WILD_DRAW_FOUR:
-                pass  # Will be handled when next player draws
-
         save_game(game)
-        await query.edit_message_text(f"✅ Warna dipilih: {chosen_color.value}")
-
+        await query.edit_message_text(f"✅ Warna: {game.current_color.value}")
         next_p = game.current_player
         msg += f"▶️ Giliran / Turn: *@{next_p.username}*"
         await ctx.bot.send_message(chat_id, msg, parse_mode=ParseMode.MARKDOWN)
-        await send_turn_pm(ctx, game)
+        await send_turn_to_group(ctx, game)
 
     elif action == "skip_draw":
-        # Pass drawn card without playing
         game.next_turn()
         save_game(game)
-        await query.edit_message_text("⏩ Kartu disimpan, giliran selesai. / Card kept, turn passed.")
+        await query.edit_message_text("⏩ Giliran selesai.")
         next_p = game.current_player
         await ctx.bot.send_message(
             chat_id,
-            f"⏩ @{current.username} menyimpan kartu.\n▶️ Giliran / Turn: *@{next_p.username}*",
+            f"⏩ *@{current.username}* simpan kartu.\n▶️ Giliran / Turn: *@{next_p.username}*",
             parse_mode=ParseMode.MARKDOWN
         )
-        await send_turn_pm(ctx, game)
+        await send_turn_to_group(ctx, game)
 
 
-def build_draw_play_keyboard(chat_id: int, card_index: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Main / Play", callback_data=f"play:{chat_id}:{card_index}"),
-            InlineKeyboardButton("⏩ Simpan / Keep", callback_data=f"skip_draw:{chat_id}:0"),
-        ]
-    ])
+async def send_turn_to_group(ctx, game):
+    """Send hand image + play buttons to group for current player."""
+    from src.card_renderer import render_hand, render_top_card
+    from src.utils import get_playable_indices, build_play_keyboard
 
-
-async def send_turn_pm(ctx, game):
-    from src.utils import build_hand_keyboard
     current = game.current_player
     top = game.top_card
 
-    try:
-        keyboard = build_hand_keyboard(current.hand, top, game.current_color, game.pending_draw, game.chat_id)
-        pm_text = (
-            f"🃏 *Giliran kamu! / Your turn!*\n\n"
-            f"Top: {top} | Color: {game.current_color.value if game.current_color else '?'}\n"
-            + (f"⚠️ Pending draw: *+{game.pending_draw}*\n" if game.pending_draw > 0 else "")
-            + f"Kartu kamu ({len(current.hand)}):\n\nPilih kartu / Choose a card:"
-        )
-        await ctx.bot.send_message(
-            current.user_id,
-            pm_text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception:
-        await ctx.bot.send_message(
-            game.chat_id,
-            f"⚠️ @{current.username} belum start bot di PM!\n"
-            f"⚠️ @{current.username} hasn't started the bot in PM!\n"
-            f"Kirim /start ke bot dulu! / Send /start to the bot first!"
-        )
+    # Get playable card indices
+    playable = get_playable_indices(current.hand, top, game.current_color, game.pending_draw)
+
+    # Render hand image
+    hand_dicts = [c.to_dict() for c in current.hand]
+    img_bytes = render_hand(hand_dicts, playable, game.chat_id)
+
+    # Build keyboard
+    keyboard = build_play_keyboard(current.hand, playable, game.chat_id, game.pending_draw)
+
+    # Status text
+    card_counts = "\n".join([
+        f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}: {len(p.hand)} kartu"
+        + (" 🔔*UNO!*" if len(p.hand) == 1 else "")
+        for p in game.players
+    ])
+
+    caption = (
+        f"▶️ Giliran / Turn: *@{current.username}*\n"
+        f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
+        + (f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else "")
+        + f"\n👥 Kartu pemain:\n{card_counts}\n\n"
+        f"*@{current.username}*, pilih kartu nomor berapa?\n_(yang terang = bisa dimainkan)_"
+    )
+
+    await ctx.bot.send_photo(
+        chat_id=game.chat_id,
+        photo=io.BytesIO(img_bytes),
+        caption=caption,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
