@@ -1,15 +1,5 @@
 """
 inline.py — Handle inline queries untuk sistem kartu UNO kayak @unobot.
-
-Alur:
-1. Pemain ngetik @botKamu di chat grup
-2. handle_inline_query dipanggil → tampilkan kartu yang bisa dimainkan
-3. Pemain tap kartu → handle_chosen_inline_result dipanggil → proses logika game
-
-Perubahan:
-- Tap kartu tidak valid → bot balas "❌ kartu ini tidak bisa dimainkan"
-- Sistem battle: pemain yang habis kartu masuk ranking, game lanjut sampai semua selesai
-- Owner autowin DIHAPUS: semua pemain main normal
 """
 
 import json
@@ -24,7 +14,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from src.game import get_game, save_game, delete_game, draw_card, add_win
+from src.game import get_game, save_game, delete_game, draw_card, add_win, get_game_by_player
 from src.cards import Card, Color, CardType
 from src.utils import (
     get_playable_indices,
@@ -39,7 +29,6 @@ _sticker_ids: dict = {}
 
 
 def _load_stickers():
-    """Load sticker file_ids dari JSON, sekali saja."""
     global _sticker_ids
     if not _sticker_ids and os.path.exists(STICKER_FILE):
         with open(STICKER_FILE) as f:
@@ -68,16 +57,8 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query_text.isdigit():
         game = get_game(int(query_text))
     else:
-        from src.game import _load_all, Game
-        all_games = _load_all()
-        for cid_str, gdata in all_games.items():
-            if gdata.get("status") != "playing":
-                continue
-            g = Game.from_dict(gdata)
-            cp = g.current_player
-            if cp and cp.user_id == user_id:
-                game = g
-                break
+        # FIX: pakai get_game_by_player, tidak lagi _load_all
+        game = get_game_by_player(user_id)
 
     if not game or game.status != "playing":
         await query.answer(
@@ -241,7 +222,6 @@ async def _process_draw(ctx, user, chat_id: int):
             await send_turn_to_group(ctx, game)
 
 
-# ─── Ranking medals ────────────────────────────────────────────────────────────
 RANK_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
