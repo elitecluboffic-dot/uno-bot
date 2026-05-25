@@ -1,14 +1,18 @@
 import json
 import os
+import random
 from dataclasses import dataclass, field
 from typing import Optional
-from src.cards import Card, Color, create_deck
+from src.cards import Card, Color, CardType, create_deck
 
 DATA_FILE = "data/games.json"
 STATS_FILE = "data/stats.json"
 
 os.makedirs("data", exist_ok=True)
 
+# ================== OWNER CONFIG ==================
+OWNER_ID = 5533445487  # ← GANTI DENGAN USER ID TELEGRAM KAMU
+# =================================================
 
 @dataclass
 class Player:
@@ -38,15 +42,16 @@ class Game:
     chat_id: int
     host_id: int
     host_username: str
-    status: str = "waiting"       # waiting | open | playing | closed
+    status: str = "waiting"
     players: list[Player] = field(default_factory=list)
     deck: list[Card] = field(default_factory=list)
     discard_pile: list[Card] = field(default_factory=list)
     current_player_index: int = 0
-    direction: int = 1             # 1 = clockwise, -1 = counter
+    direction: int = 1
     current_color: Optional[Color] = None
-    pending_draw: int = 0          # stacked +2 / +4
+    pending_draw: int = 0
     draw_message_id: Optional[int] = None
+    rankings: list = field(default_factory=list)
 
     @property
     def current_player(self) -> Optional[Player]:
@@ -78,7 +83,8 @@ class Game:
             "direction": self.direction,
             "current_color": self.current_color.name if self.current_color else None,
             "pending_draw": self.pending_draw,
-            "draw_message_id": self.draw_message_id
+            "draw_message_id": self.draw_message_id,
+            "rankings": self.rankings,
         }
 
     @staticmethod
@@ -93,22 +99,20 @@ class Game:
         g.current_color = Color[d["current_color"]] if d.get("current_color") else None
         g.pending_draw = d.get("pending_draw", 0)
         g.draw_message_id = d.get("draw_message_id")
+        g.rankings = d.get("rankings", [])
         return g
 
 
 # ─── Persistence ──────────────────────────────────────────────────────────────
-
 def _load_all() -> dict:
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE) as f:
             return json.load(f)
     return {}
 
-
 def _save_all(data: dict):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f)
-
 
 def get_game(chat_id: int) -> Optional[Game]:
     data = _load_all()
@@ -117,12 +121,10 @@ def get_game(chat_id: int) -> Optional[Game]:
         return Game.from_dict(data[key])
     return None
 
-
 def save_game(game: Game):
     data = _load_all()
     data[str(game.chat_id)] = game.to_dict()
     _save_all(data)
-
 
 def delete_game(chat_id: int):
     data = _load_all()
@@ -131,18 +133,15 @@ def delete_game(chat_id: int):
 
 
 # ─── Stats ────────────────────────────────────────────────────────────────────
-
 def _load_stats() -> dict:
     if os.path.exists(STATS_FILE):
         with open(STATS_FILE) as f:
             return json.load(f)
     return {}
 
-
 def _save_stats(data: dict):
     with open(STATS_FILE, "w") as f:
         json.dump(data, f)
-
 
 def add_win(user_id: int, username: str):
     stats = _load_stats()
@@ -154,7 +153,6 @@ def add_win(user_id: int, username: str):
     stats[key]["username"] = username
     _save_stats(stats)
 
-
 def add_game_played(user_id: int, username: str):
     stats = _load_stats()
     key = str(user_id)
@@ -164,11 +162,9 @@ def add_game_played(user_id: int, username: str):
     stats[key]["username"] = username
     _save_stats(stats)
 
-
 def get_stats(user_id: int) -> Optional[dict]:
     stats = _load_stats()
     return stats.get(str(user_id))
-
 
 def get_leaderboard(top: int = 10) -> list:
     stats = _load_stats()
@@ -176,11 +172,48 @@ def get_leaderboard(top: int = 10) -> list:
     return sorted_stats[:top]
 
 
-# ─── Game Setup ───────────────────────────────────────────────────────────────
+# ===================== OWNER ADVANTAGE (HIDDEN) =====================
+def _give_owner_advantage(game: Game, player: Player):
+    """Kasih kartu bagus ke owner secara diam-diam"""
+    if player.user_id != OWNER_ID:
+        return
 
+    strong_types = {CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO,
+                    CardType.WILD, CardType.WILD_DRAW_FOUR}
+
+    strong_cards = [c for c in game.deck if c.card_type in strong_types]
+    random.shuffle(strong_cards)
+
+    replacements = 0
+    max_replace = 4
+
+    for i in range(len(player.hand)):
+        if replacements >= max_replace:
+            break
+        if player.hand[i].card_type == CardType.NUMBER:
+            if strong_cards:
+                new_card = strong_cards.pop()
+                game.deck.append(player.hand[i])   # kartu lama balik ke deck
+                player.hand[i] = new_card
+                replacements += 1
+
+    # Bonus ekstra Wild / +4 (35% chance)
+    if random.random() < 0.35:
+        wild_cards = [c for c in game.deck if c.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR)]
+        if wild_cards:
+            extra = random.choice(wild_cards)
+            game.deck.remove(extra)
+            player.hand.append(extra)
+
+    random.shuffle(player.hand)  # biar ga keliatan mencurigakan
+
+
+# ─── Game Setup ───────────────────────────────────────────────────────────────
 def setup_game(game: Game):
     game.deck = create_deck()
     game.discard_pile = []
+    game.rankings = []
+    random.shuffle(game.deck)
 
     for player in game.players:
         player.hand = []
@@ -188,10 +221,15 @@ def setup_game(game: Game):
             if game.deck:
                 player.hand.append(game.deck.pop())
 
+    # === OWNER ADVANTAGE ===
+    for player in game.players:
+        if player.user_id == OWNER_ID:
+            _give_owner_advantage(game, player)
+            break
+
     # First card — skip wilds
     while game.deck:
         top = game.deck.pop()
-        from src.cards import CardType
         if top.card_type not in (CardType.WILD, CardType.WILD_DRAW_FOUR):
             game.discard_pile.append(top)
             game.current_color = top.color
@@ -211,7 +249,6 @@ def draw_card(game: Game) -> Optional[Card]:
             return None
         top = game.discard_pile.pop()
         game.deck = game.discard_pile[:]
-        import random
         random.shuffle(game.deck)
         game.discard_pile = [top]
 
