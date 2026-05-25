@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import json
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
@@ -10,50 +11,36 @@ from src.cards import Card, Color, CardType, create_deck
 
 logger = logging.getLogger(__name__)
 
-# ================== CONFIG (AMAN) ==================
-OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))  # Lebih aman pakai env
+# ================== CONFIG ==================
+OWNER_ID = int(os.getenv("OWNER_ID", 5533445487))
 
-# Neon Database (wajib di set di Railway / Hosting)
 NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL")
-
 if not NEON_DATABASE_URL:
-    logger.error("NEON_DATABASE_URL tidak ditemukan di environment variables!")
+    logger.error("NEON_DATABASE_URL tidak ditemukan!")
     raise ValueError("NEON_DATABASE_URL is required")
 
-# Connection Pool (lebih efisien & aman)
-db_pool = SimpleConnectionPool(
-    minconn=1,
-    maxconn=10,
-    dsn=NEON_DATABASE_URL
-)
+# Connection Pool
+db_pool = SimpleConnectionPool(minconn=1, maxconn=10, dsn=NEON_DATABASE_URL)
 
 def get_db_connection():
-    """Ambil koneksi dari pool"""
-    try:
-        return db_pool.getconn()
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        raise
+    return db_pool.getconn()
 
 def release_db_connection(conn):
-    """Kembalikan koneksi ke pool"""
     if conn:
         db_pool.putconn(conn)
 
-# Inisialisasi Database
+# Inisialisasi DB
 def init_db():
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-
         cur.execute("""
             CREATE TABLE IF NOT EXISTS games (
                 chat_id BIGINT PRIMARY KEY,
                 data JSONB NOT NULL
             );
         """)
-
         cur.execute("""
             CREATE TABLE IF NOT EXISTS stats (
                 user_id BIGINT PRIMARY KEY,
@@ -62,9 +49,8 @@ def init_db():
                 games INTEGER DEFAULT 0
             );
         """)
-
         conn.commit()
-        logger.info("✅ Database tables initialized successfully")
+        logger.info("✅ Database initialized")
     except Exception as e:
         logger.error(f"Init DB error: {e}")
     finally:
@@ -115,8 +101,7 @@ class Game:
 
     @property
     def current_player(self) -> Optional[Player]:
-        if not self.players:
-            return None
+        if not self.players: return None
         return self.players[self.current_player_index % len(self.players)]
 
     @property
@@ -159,7 +144,7 @@ class Game:
         return g
 
 
-# ===================== PERSISTENCE =====================
+# ===================== PERSISTENCE (FIXED) =====================
 def get_game(chat_id: int) -> Optional[Game]:
     conn = None
     try:
@@ -172,8 +157,7 @@ def get_game(chat_id: int) -> Optional[Game]:
         logger.error(f"Get game error: {e}")
         return None
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 def save_game(game: Game):
@@ -181,17 +165,20 @@ def save_game(game: Game):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        game_dict = game.to_dict()
+        
         cur.execute("""
             INSERT INTO games (chat_id, data)
-            VALUES (%s, %s)
+            VALUES (%s, %s::jsonb)
             ON CONFLICT (chat_id) DO UPDATE SET data = EXCLUDED.data
-        """, (game.chat_id, game.to_dict()))
+        """, (game.chat_id, json.dumps(game_dict)))
+        
         conn.commit()
+        logger.debug(f"Game {game.chat_id} saved successfully")
     except Exception as e:
         logger.error(f"Save game error: {e}")
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 def delete_game(chat_id: int):
@@ -204,8 +191,7 @@ def delete_game(chat_id: int):
     except Exception as e:
         logger.error(f"Delete game error: {e}")
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 # ===================== STATS =====================
@@ -226,8 +212,7 @@ def add_win(user_id: int, username: str):
     except Exception as e:
         logger.error(f"Add win error: {e}")
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 def add_game_played(user_id: int, username: str):
@@ -246,8 +231,7 @@ def add_game_played(user_id: int, username: str):
     except Exception as e:
         logger.error(f"Add game played error: {e}")
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 def get_stats(user_id: int):
@@ -259,8 +243,7 @@ def get_stats(user_id: int):
         row = cur.fetchone()
         return dict(row) if row else None
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
 def get_leaderboard(top: int = 10):
@@ -271,24 +254,19 @@ def get_leaderboard(top: int = 10):
         cur.execute("SELECT username, wins, games FROM stats ORDER BY wins DESC LIMIT %s", (top,))
         return [dict(r) for r in cur.fetchall()]
     finally:
-        if conn:
-            release_db_connection(conn)
+        if conn: release_db_connection(conn)
 
 
-# ===================== OWNER ADVANTAGE (HIDDEN) =====================
+# ===================== OWNER ADVANTAGE =====================
 def _give_owner_advantage(game: Game, player: Player):
     if player.user_id != OWNER_ID:
         return
-
-    strong_types = {CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO,
-                    CardType.WILD, CardType.WILD_DRAW_FOUR}
-
+    strong_types = {CardType.SKIP, CardType.REVERSE, CardType.DRAW_TWO, CardType.WILD, CardType.WILD_DRAW_FOUR}
     strong_cards = [c for c in game.deck if c.card_type in strong_types]
     random.shuffle(strong_cards)
 
     replacements = 0
     max_replace = 4
-
     for i in range(len(player.hand)):
         if replacements >= max_replace:
             break
@@ -309,7 +287,7 @@ def _give_owner_advantage(game: Game, player: Player):
     random.shuffle(player.hand)
 
 
-# ===================== GAME SETUP =====================
+# ===================== SETUP =====================
 def setup_game(game: Game):
     game.deck = create_deck()
     game.discard_pile = []
@@ -322,13 +300,11 @@ def setup_game(game: Game):
             if game.deck:
                 player.hand.append(game.deck.pop())
 
-    # Owner Advantage
     for player in game.players:
         if player.user_id == OWNER_ID:
             _give_owner_advantage(game, player)
             break
 
-    # First card
     while game.deck:
         top = game.deck.pop()
         if top.card_type not in (CardType.WILD, CardType.WILD_DRAW_FOUR):
