@@ -19,7 +19,9 @@ from src.cards import Card, Color, CardType
 from src.utils import (
     get_playable_indices,
     build_color_keyboard,
+    build_play_keyboard,
     mention,
+    send_turn_to_group,  # ✅ dari utils, tidak didefinisiin ulang di sini
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,6 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if query_text.isdigit():
         game = get_game(int(query_text))
     else:
-        # FIX: pakai get_game_by_player, tidak lagi _load_all
         game = get_game_by_player(user_id)
 
     if not game or game.status != "playing":
@@ -197,7 +198,6 @@ async def _process_draw(ctx, user, chat_id: int):
 
         if c.can_play_on(game.top_card, game.current_color):
             save_game(game)
-            from src.utils import build_play_keyboard
             playable = get_playable_indices(current.hand, game.top_card, game.current_color, 0)
             keyboard = build_play_keyboard(current.hand, playable, chat_id, 0)
             await ctx.bot.send_message(
@@ -399,46 +399,6 @@ async def _send_final_results(ctx, chat_id: int, game):
         f"🏁 *GAME SELESAI! HASIL BATTLE:*\n\n"
         f"{ranking_text}\n\n"
         f"Ketik /new untuk main lagi!",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-
-async def send_turn_to_group(ctx, game):
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-    current = game.current_player
-    top = game.top_card
-
-    if "active_chat_ids" not in ctx.bot_data:
-        ctx.bot_data["active_chat_ids"] = set()
-    ctx.bot_data["active_chat_ids"].add(game.chat_id)
-
-    player_list = "\n".join([
-        f"  {'▶️' if p.user_id == current.user_id else '  '} @{p.username}"
-        + (" 🔔 *UNO!*" if len(p.hand) == 1 else "")
-        for p in game.players
-    ])
-
-    pending_msg = f"⚠️ Wajib stack/ambil: *+{game.pending_draw}*\n" if game.pending_draw > 0 else ""
-
-    text = (
-        f"▶️ Giliran / Turn: *@{current.username}*\n"
-        f"🃏 Top: *{top}* | 🎨 {game.current_color.value if game.current_color else '?'}\n"
-        f"{pending_msg}"
-        f"\n👥 Pemain:\n{player_list}"
-    )
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🃏 Make your choice!",
-            switch_inline_query_current_chat=""
-        )
-    ]])
-
-    await ctx.bot.send_message(
-        chat_id=game.chat_id,
-        text=text,
-        reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
 
