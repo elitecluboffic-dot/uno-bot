@@ -58,7 +58,7 @@ def _card_key(card_dict: dict) -> str:
 async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Called when user types @botKamu in any chat.
-    Shows the player's hand as inline results.
+    Shows only playable cards in the player's hand.
     """
     _load_stickers()
 
@@ -117,13 +117,14 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         thumbnail_url="https://upload.wikimedia.org/wikipedia/commons/thumb/9/9e/UNO_Logo.svg/200px-UNO_Logo.svg.png"
     ))
 
-    # Each card in hand
+    # Hanya tampilkan kartu yang bisa dimainkan
     for i, card in enumerate(current.hand):
+        if i not in playable:
+            continue
+
         card_dict = card.to_dict()
-        is_playable = i in playable
         label = _card_display_name(card)
-        desc = "✅ Bisa dimainkan" if is_playable else "❌ Tidak bisa dimainkan"
-        result_id = f"card:{game.chat_id}:{i}:{'1' if is_playable else '0'}"
+        result_id = f"card:{game.chat_id}:{i}:1"
 
         sticker_fid = _sticker_ids.get(_card_key(card_dict))
 
@@ -135,8 +136,8 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             results.append(InlineQueryResultArticle(
                 id=result_id,
-                title=f"{'✅' if is_playable else '❌'} {label}",
-                description=desc,
+                title=f"✅ {label}",
+                description="Tap untuk mainkan kartu ini",
                 input_message_content=InputTextMessageContent(
                     message_text=f"__card__{game.chat_id}__{i}",
                 ),
