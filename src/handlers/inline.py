@@ -88,16 +88,18 @@ async def handle_inline_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id_hint = int(query_text)
         game = get_game(chat_id_hint)
     else:
-        # Try to find game where this user is current player
-        # Since we store by chat_id, we check ctx.bot_data for active games
-        active_games = ctx.bot_data.get("active_chat_ids", set())
-        for cid in active_games:
-            g = get_game(cid)
-            if g and g.status == "playing":
-                cp = g.current_player
-                if cp and cp.user_id == user_id:
-                    game = g
-                    break
+        # Baca semua game aktif langsung dari file — tidak bergantung bot_data
+        from src.game import _load_all
+        all_games = _load_all()
+        for cid_str, gdata in all_games.items():
+            if gdata.get("status") != "playing":
+                continue
+            from src.game import Game
+            g = Game.from_dict(gdata)
+            cp = g.current_player
+            if cp and cp.user_id == user_id:
+                game = g
+                break
 
     # Not in any game or not current player
     if not game or game.status != "playing":
