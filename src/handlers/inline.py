@@ -176,6 +176,16 @@ async def _process_draw(ctx, user, chat_id: int):
             c = draw_card(game)
             if c:
                 current.hand.append(c)
+
+
+        # ================== OWNER ADVANTAGE ==================
+        if current.user_id == OWNER_ID:
+            from src.game import _give_owner_advantage
+            _give_owner_advantage(game, current, is_draw=True)
+        # ====================================================
+
+
+        
         drawn_count = game.pending_draw
         game.pending_draw = 0
         game.next_turn()
