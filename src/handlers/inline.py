@@ -14,7 +14,7 @@ from telegram import (
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from src.game import get_game, save_game, delete_game, draw_card, add_win, get_game_by_player
+from src.game import get_game, save_game, delete_game, draw_card, add_win, get_game_by_player, OWNER_ID, _give_owner_advantage
 from src.cards import Card, Color, CardType
 from src.utils import (
     get_playable_indices,
@@ -180,7 +180,6 @@ async def _process_draw(ctx, user, chat_id: int):
 
         # ================== OWNER ADVANTAGE ==================
         if current.user_id == OWNER_ID:
-            from src.game import _give_owner_advantage
             _give_owner_advantage(game, current, is_draw=True)
         # ====================================================
 
