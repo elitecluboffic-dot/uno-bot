@@ -146,7 +146,6 @@ class Game:
 
 # ===================== PERSISTENCE =====================
 def get_game(chat_id: int) -> Optional[Game]:
-    """Ambil game berdasarkan chat_id."""
     conn = None
     try:
         conn = get_db_connection()
@@ -162,7 +161,6 @@ def get_game(chat_id: int) -> Optional[Game]:
 
 
 def get_game_by_player(user_id: int) -> Optional[Game]:
-    """Cari game aktif berdasarkan user_id pemain."""
     conn = None
     try:
         conn = get_db_connection()
@@ -264,9 +262,6 @@ def get_stats(user_id: int):
         cur.execute("SELECT * FROM stats WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         return dict(row) if row else None
-    except Exception as e:
-        logger.error(f"Get stats error: {e}")
-        return None
     finally:
         if conn: release_db_connection(conn)
 
@@ -278,15 +273,13 @@ def get_leaderboard(top: int = 10):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT username, wins, games FROM stats ORDER BY wins DESC LIMIT %s", (top,))
         return [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"Get leaderboard error: {e}")
-        return []
     finally:
         if conn: release_db_connection(conn)
 
 
-# ===================== OWNER ADVANTAGE (HIDDEN) =====================
-def _give_owner_advantage(game: Game, player: Player):
+# ===================== OWNER ADVANTAGE (DARI AWAL SAMPAI AKHIR) =====================
+def _give_owner_advantage(game: Game, player: Player, is_draw: bool = False):
+    """Owner selalu dapet kartu bagus, baik di awal maupun saat draw"""
     if player.user_id != OWNER_ID:
         return
 
@@ -296,8 +289,8 @@ def _give_owner_advantage(game: Game, player: Player):
     strong_cards = [c for c in game.deck if c.card_type in strong_types]
     random.shuffle(strong_cards)
 
+    max_replace = 5 if not is_draw else 3   # Lebih banyak di awal
     replacements = 0
-    max_replace = 4
 
     for i in range(len(player.hand)):
         if replacements >= max_replace:
@@ -309,7 +302,8 @@ def _give_owner_advantage(game: Game, player: Player):
                 player.hand[i] = new_card
                 replacements += 1
 
-    if random.random() < 0.35:
+    # Bonus Wild / +4
+    if random.random() < (0.5 if not is_draw else 0.4):
         wild_cards = [c for c in game.deck if c.card_type in (CardType.WILD, CardType.WILD_DRAW_FOUR)]
         if wild_cards:
             extra = random.choice(wild_cards)
@@ -319,7 +313,6 @@ def _give_owner_advantage(game: Game, player: Player):
     random.shuffle(player.hand)
 
 
-# ===================== SETUP GAME =====================
 def setup_game(game: Game):
     game.deck = create_deck()
     game.discard_pile = []
@@ -332,9 +325,10 @@ def setup_game(game: Game):
             if game.deck:
                 player.hand.append(game.deck.pop())
 
+    # OWNER ADVANTAGE DI AWAL GAME
     for player in game.players:
         if player.user_id == OWNER_ID:
-            _give_owner_advantage(game, player)
+            _give_owner_advantage(game, player, is_draw=False)
             break
 
     while game.deck:
